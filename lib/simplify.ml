@@ -543,7 +543,7 @@ module IndexTerms = struct
           match base with
           | IT (ArrayShift { base = base2; ct = ct2; index = i2 }, _, _)
             when Sctypes.equal ct ct2 ->
-            (base2, IT.add_ (index, i2) the_loc)
+            (base2, IT.add_ (IT.ensure_uintptr_bt index, IT.ensure_uintptr_bt i2) the_loc)
           | _ -> (base, index)
         in
         let index = aux index in

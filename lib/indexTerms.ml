@@ -698,6 +698,13 @@ let cast_ bt' it loc =
   if BT.equal bt' (get_bt it) then it else IT (Cast (bt', it), bt', loc)
 
 
+let ensure_uintptr_bt it =
+  if BT.equal (get_bt it) Memory.uintptr_bt then
+    it
+  else
+    cast_ Memory.uintptr_bt it (get_loc it)
+
+
 let uintptr_const_ n loc = num_lit_ n Memory.uintptr_bt loc
 
 let uintptr_int_ n loc = uintptr_const_ (Z.of_int n) loc

@@ -946,12 +946,7 @@ let rec translate_term s iterm =
       ~offset:
         (let el_size = int_lit_ (Memory.size_of_ctype ct) Memory.uintptr_bt loc in
          (* locations don't matter here - we are translating straight away *)
-         let ix =
-           if BT.equal (IT.get_bt index) Memory.uintptr_bt then
-             index
-           else
-             cast_ Memory.uintptr_bt index loc
-         in
+         let ix = ensure_uintptr_bt index in
          translate_term s (mul_ (el_size, ix) loc))
   | CopyAllocId { addr; loc } ->
     CN_Pointer.copy_alloc_id
