@@ -847,6 +847,12 @@ module WIT = struct
         let@ base = check loc (Loc ()) base in
         let@ index = infer index in
         let@ () = ensure_bits_type loc (IT.get_bt index) in
+        let index =
+          if BT.equal (IT.get_bt index) Memory.uintptr_bt then
+            index
+          else
+            cast_ Memory.uintptr_bt index loc
+        in
         return (IT (ArrayShift { base; ct; index }, BT.Loc (), loc))
       | CopyAllocId { addr; loc = ptr } ->
         let@ addr = check loc Memory.uintptr_bt addr in
