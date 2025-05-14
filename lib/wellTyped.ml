@@ -1899,7 +1899,12 @@ module BaseTyping = struct
         (IT.get_loc it)
         (IT.get_bt it)
         (IndexTerms.pp it);
-      return (Extract (attrs, to_extract, it))
+      let index = if BT.equal (IT.get_bt it) Memory.uintptr_bt then
+        it
+      else
+        IT.cast_ Memory.uintptr_bt it loc
+      in
+      return (Extract (attrs, to_extract, index))
     | Unfold (f, its) ->
       let@ def = get_logical_function_def loc f in
       if Definition.Function.is_recursive def then
