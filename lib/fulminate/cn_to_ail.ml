@@ -1772,7 +1772,7 @@ let rec cn_to_ail_expr_aux
                  in
                  A.
                    { loc = Cerb_location.unknown;
-                     desug_info = Desug_none;
+                     desug_info = { is_forloop_body = false; desug_case = None };
                      attrs = CF.Annot.Attrs [ attribute ];
                      node = ail_case
                    }
@@ -2176,7 +2176,7 @@ let generate_datatype_equality_function (filename : string) (cn_datatype : _ cn_
     in
     A.
       { loc = Cerb_location.unknown;
-        desug_info = Desug_none;
+        desug_info = { is_forloop_body = false; desug_case = None };
         attrs = CF.Annot.Attrs [ attribute ];
         node = ail_case
       }
@@ -2294,7 +2294,7 @@ let generate_datatype_default_function (cn_datatype : _ cn_datatype) =
   let res_tag_assign_stat =
     A.
       { loc = Cerb_location.unknown;
-        desug_info = Desug_none;
+        desug_info = { is_forloop_body = false; desug_case = None };
         attrs = CF.Annot.Attrs [ attribute ];
         node = res_tag_assign
       }
