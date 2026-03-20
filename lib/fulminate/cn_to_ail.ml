@@ -539,17 +539,27 @@ let gen_bump_alloc_bs_and_ss () =
   (frame_id_binding, start_stat_, end_stat_)
 
 
-let gen_bool_while_loop sym bt start_expr while_cond ?(if_cond_opt = None) (bs, ss, e) =
+let gen_bool_while_loop
+      ?(if_cond_opt = None)
+      ?(extra_block_bindings = [])
+      ?(extra_block_stmts = [])
+      sym
+      bt
+      start_expr
+      while_cond
+      (bs, ss, e)
+  =
   (*
      Input:
      each (bt sym; start_expr <= sym && while_cond) {t}
 
      where (bs, ss, e) = cn_to_ail called on t with PassBack
   *)
+  let c_bool_ctype = mk_ctype C.(Basic (Integer Bool)) in
   let b = Sym.fresh_anon () in
   let b_ident = A.(AilEident b) in
-  let b_binding = create_binding b (bt_to_ail_ctype BT.Bool) in
-  let b_decl = A.(AilSdeclaration [ (b, Some cn_bool_true_expr) ]) in
+  let b_binding = create_binding b c_bool_ctype in
+  let b_decl = A.(AilSdeclaration [ (b, Some (mk_expr true_const)) ]) in
   let incr_var = A.(AilEident sym) in
   let incr_var_binding = create_binding sym (bt_to_ail_ctype bt) in
   let start_decl = A.(AilSdeclaration [ (sym, Some (mk_expr start_expr)) ]) in
@@ -557,9 +567,12 @@ let gen_bool_while_loop sym bt start_expr while_cond ?(if_cond_opt = None) (bs, 
   let incr_func_name =
     match typedef_name with Some str -> str ^ "_increment" | None -> ""
   in
-  let cn_bool_and_sym = Sym.fresh "cn_bool_and" in
   let rhs_and_expr_ =
-    A.(AilEcall (mk_expr (AilEident cn_bool_and_sym), [ mk_expr b_ident; e ]))
+    A.(
+      AilEbinary
+        ( mk_expr b_ident,
+          Arithmetic Band,
+          wrap_with_convert_from_cn_bool e ))
   in
   let b_assign =
     A.(AilSexpr (mk_expr (AilEassign (mk_expr b_ident, mk_expr rhs_and_expr_))))
@@ -589,9 +602,12 @@ let gen_bool_while_loop sym bt start_expr while_cond ?(if_cond_opt = None) (bs, 
     A.(AilSwhile (while_cond_with_conversion, mk_stmt (AilSblock (bs, loop_body)), 0))
   in
   let block =
-    A.(AilSblock ([ incr_var_binding ], List.map mk_stmt [ start_decl; while_loop ]))
+    A.(
+      AilSblock
+        ( [ incr_var_binding ] @ extra_block_bindings,
+          List.map mk_stmt (extra_block_stmts @ [ start_decl; while_loop ]) ))
   in
-  ([ b_binding ], [ b_decl; block ], mk_expr b_ident)
+  ([ b_binding ], [ b_decl; block ], mk_expr (wrap_with_convert_to b_ident BT.Bool))
 
 
 let cn_to_ail_default bt =
@@ -2954,12 +2970,6 @@ let get_quantified_loop_bounds (i_sym, i_bt) it =
     upper_is_strict
   }
 
-
-let get_while_bounds_and_cond q it =
-  let { start_expr; end_expr; interval_cond; _ } = get_quantified_loop_bounds q it in
-  (start_expr, end_expr, interval_cond)
-
-
 let cn_to_ail_resource
       filename
       sym
@@ -3362,27 +3372,51 @@ let cn_to_ail_logical_constraint_aux
           
           assign/return/assert/passback b
        *)
-       let start_expr, _, while_loop_cond = get_while_bounds_and_cond (sym, bt) cond_it in
-       let _, _, e_start =
+       let { start_expr; end_expr; interval_cond; upper_is_strict } =
+         get_quantified_loop_bounds (sym, bt) cond_it
+       in
+       let b_start, s_start, e_start =
          cn_to_ail_expr filename dts globals spec_mode_opt start_expr PassBack
+       in
+       let end_sym = Sym.fresh (Sym.pp_string sym ^ "_end") in
+       let end_binding = create_binding end_sym (bt_to_ail_ctype bt) in
+       let end_it = IT.IT (IT.(Sym end_sym), bt, Cerb_location.unknown) in
+       let b_end, s_end, e_end =
+         cn_to_ail_expr filename dts globals spec_mode_opt end_expr PassBack
+       in
+       let end_assign = A.(AilSdeclaration [ (end_sym, Some e_end) ]) in
+       let sym_it = IT.IT (IT.(Sym sym), bt, Cerb_location.unknown) in
+       let while_loop_cond =
+         if upper_is_strict then
+           IT.lt_ (sym_it, end_it) Cerb_location.unknown
+         else
+           IT.le_ (sym_it, end_it) Cerb_location.unknown
        in
        let _, _, while_cond_expr =
          cn_to_ail_expr filename dts globals spec_mode_opt while_loop_cond PassBack
        in
-       let _, _, if_cond_expr =
-         cn_to_ail_expr filename dts globals spec_mode_opt cond_it PassBack
+       let if_cond_expr_opt, b_if, s_if =
+         if quantified_permission_matches_interval cond_it interval_cond then
+           (None, [], [])
+         else (
+           let b_if, s_if, if_cond_expr =
+             cn_to_ail_expr filename dts globals spec_mode_opt cond_it PassBack
+           in
+           (Some if_cond_expr, b_if, s_if))
        in
        let t_translated = cn_to_ail_expr filename dts globals spec_mode_opt t PassBack in
        let bs, ss, e =
          gen_bool_while_loop
+           ~extra_block_bindings:([ end_binding ] @ b_start @ b_end)
+           ~extra_block_stmts:(s_start @ s_end @ [ end_assign ])
            sym
            bt
            (rm_expr e_start)
            while_cond_expr
-           ~if_cond_opt:(Some if_cond_expr)
+           ~if_cond_opt:if_cond_expr_opt
            t_translated
        in
-       dest d spec_mode_opt (bs, ss, e))
+       dest d spec_mode_opt (b_if @ bs, s_if @ ss, e))
 
 
 let cn_to_ail_logical_constraint
