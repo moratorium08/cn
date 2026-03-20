@@ -2878,11 +2878,29 @@ let cn_to_ail_struct ((sym, (loc, attrs, tag_def)) : A.sigma_tag_definition)
   | C.UnionDef _ -> []
 
 
-let get_while_bounds_and_cond (i_sym, i_bt) it =
-  (* Translation of q.pointer *)
-  let i_it = IT.IT (IT.(Sym i_sym), i_bt, Cerb_location.unknown) in
-  (* Start of range *)
-  let start_expr =
+type quantified_loop_bounds =
+  { start_expr : IT.t;
+    end_expr : IT.t;
+    interval_cond : IT.t;
+    upper_is_strict : bool
+  }
+
+
+let quantified_permission_matches_interval permission interval_cond =
+  let simp_ctxt = Simplify.default Global.empty in
+  let normalize it =
+    Simplify.IndexTerms.simp_flatten simp_ctxt it |> List.sort IT.compare
+  in
+  let permission_clauses = normalize permission in
+  let interval_clauses = normalize interval_cond in
+  List.compare_lengths permission_clauses interval_clauses = 0
+  && List.for_all2 IT.equal permission_clauses interval_clauses
+
+
+let get_quantified_loop_bounds (i_sym, i_bt) it =
+  let loc = Cerb_location.unknown in
+  let i_it = IT.IT (IT.(Sym i_sym), i_bt, loc) in
+  let raw_start_expr =
     if BT.equal_sign (fst (Option.get (BT.is_bits_bt i_bt))) BT.Unsigned then
       IndexTerms.Bounds.get_lower_bound (i_sym, i_bt) it
     else (
@@ -2900,21 +2918,15 @@ let get_while_bounds_and_cond (i_sym, i_bt) it =
           ();
         exit 2)
   in
-  let start_expr =
-    IT.IT
-      ( IT.Cast (IT.get_bt start_expr, start_expr),
-        IT.get_bt start_expr,
-        Cerb_location.unknown )
-  in
   let start_cond =
-    match start_expr with
+    match raw_start_expr with
     | IT (Binop (Add, start_expr', IT (Const (Bits (_, n)), _, _)), _, _)
       when Z.equal n Z.one ->
-      IT.lt_ (start_expr', i_it) Cerb_location.unknown
-    | _ -> IT.le_ (start_expr, i_it) Cerb_location.unknown
+      IT.lt_ (start_expr', i_it) loc
+    | _ -> IT.le_ (raw_start_expr, i_it) loc
   in
-  (* End of range *)
-  let end_expr =
+  let start_expr = IT.cast_ i_bt raw_start_expr loc in
+  let raw_end_expr =
     match IndexTerms.Bounds.get_upper_bound_opt (i_sym, i_bt) it with
     | Some e -> e
     | None ->
@@ -2929,14 +2941,23 @@ let get_while_bounds_and_cond (i_sym, i_bt) it =
         ();
       exit 2
   in
-  let end_cond =
-    match end_expr with
+  let end_expr, upper_is_strict, end_cond =
+    match raw_end_expr with
     | IT (Binop (Sub, end_expr', IT (Const (Bits (_, n)), _, _)), _, _)
       when Z.equal n Z.one ->
-      IT.lt_ (i_it, end_expr') Cerb_location.unknown
-    | _ -> IT.le_ (i_it, end_expr) Cerb_location.unknown
+      (end_expr', true, IT.lt_ (i_it, end_expr') loc)
+    | _ -> (raw_end_expr, false, IT.le_ (i_it, raw_end_expr) loc)
   in
-  (start_expr, end_expr, IT.and2_ (start_cond, end_cond) Cerb_location.unknown)
+  { start_expr;
+    end_expr;
+    interval_cond = IT.and2_ (start_cond, end_cond) loc;
+    upper_is_strict
+  }
+
+
+let get_while_bounds_and_cond q it =
+  let { start_expr; end_expr; interval_cond; _ } = get_quantified_loop_bounds q it in
+  (start_expr, end_expr, interval_cond)
 
 
 let cn_to_ail_resource
@@ -3067,9 +3088,6 @@ let cn_to_ail_resource
        Input is expr of the form:
       take sym = each (integer q.q; q.permission){ Owned(q.pointer + (q.q * q.step)) }
     *)
-    let b1, s1, _e1 =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.pointer PassBack
-    in
     (*
        Generating a loop of the form:
     <set q.q to start value>
@@ -3079,34 +3097,43 @@ let cn_to_ail_resource
     }
     *)
     let i_sym, i_bt = q.q in
-    let start_expr, _, while_loop_cond = get_while_bounds_and_cond q.q q.permission in
-    let _, _, e_start =
+    let { start_expr; end_expr; interval_cond; upper_is_strict } =
+      get_quantified_loop_bounds q.q q.permission
+    in
+    let b_start, s_start, e_start =
       cn_to_ail_expr filename dts globals spec_mode_opt start_expr PassBack
+    in
+    let end_sym = Sym.fresh (Sym.pp_string i_sym ^ "_end") in
+    let end_it = IT.IT (IT.(Sym end_sym), i_bt, Cerb_location.unknown) in
+    let b_end, s_end, e_end =
+      cn_to_ail_expr filename dts globals spec_mode_opt end_expr PassBack
+    in
+    let i_it = IT.IT (IT.(Sym i_sym), i_bt, Cerb_location.unknown) in
+    let while_loop_cond =
+      if upper_is_strict then
+        IT.lt_ (i_it, end_it) Cerb_location.unknown
+      else
+        IT.le_ (i_it, end_it) Cerb_location.unknown
     in
     let _, _, while_cond_expr =
       cn_to_ail_expr filename dts globals spec_mode_opt while_loop_cond PassBack
     in
-    let _, _, if_cond_expr =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
+    let if_cond_expr_opt, b_if, s_if =
+      if quantified_permission_matches_interval q.permission interval_cond then
+        (None, [], [])
+      else (
+        let b_if, s_if, if_cond_expr =
+          cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
+        in
+        (Some if_cond_expr, b_if, s_if))
     in
     let cn_integer_ptr_ctype = bt_to_ail_ctype i_bt in
-    let b2, s2, _e2 =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
-    in
-    let b3, s3, _e3 =
-      cn_to_ail_expr
-        filename
-        dts
-        globals
-        spec_mode_opt
-        (IT.sizeOf_ q.step Cerb_location.unknown)
-        PassBack
-    in
     let start_binding = create_binding i_sym cn_integer_ptr_ctype in
+    let end_binding = create_binding end_sym cn_integer_ptr_ctype in
     let start_assign = A.(AilSdeclaration [ (i_sym, Some e_start) ]) in
+    let end_assign = A.(AilSdeclaration [ (end_sym, Some e_end) ]) in
     let return_ctype, _return_bt = calculate_resource_return_type preds loc q.name in
     (* Translation of q.pointer *)
-    let i_it = IT.IT (IT.(Sym i_sym), i_bt, Cerb_location.unknown) in
     let value_it =
       IT.arrayShift_ ~base:q.pointer ~index:i_it q.step Cerb_location.unknown
     in
@@ -3179,25 +3206,40 @@ let cn_to_ail_resource
       match rm_ctype return_ctype with
       | C.Void ->
         let void_pred_call = A.(AilSexpr rhs) in
-        let if_stat =
-          A.(
-            AilSif
-              ( wrap_with_convert_from_cn_bool if_cond_expr,
-                mk_stmt
-                  (AilSblock
-                     ( [ ptr_add_binding ],
-                       List.map mk_stmt [ ptr_add_stat; void_pred_call ] )),
-                mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+        let loop_body =
+          match if_cond_expr_opt with
+          | Some if_cond_expr ->
+            let if_stat =
+              A.(
+                AilSif
+                  ( wrap_with_convert_from_cn_bool if_cond_expr,
+                    mk_stmt
+                      (AilSblock
+                         ( ptr_add_binding :: b4,
+                           List.map mk_stmt (s4 @ [ ptr_add_stat; void_pred_call ]) )),
+                    mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+            in
+            List.map mk_stmt [ if_stat; increment_stat ]
+          | None ->
+            List.map
+              mk_stmt
+              [ A.(AilSblock (ptr_add_binding :: b4, List.map mk_stmt (s4 @ [ ptr_add_stat; void_pred_call ])));
+                increment_stat
+              ]
         in
         let while_loop =
           A.(
             AilSwhile
               ( wrap_with_convert_from_cn_bool while_cond_expr,
-                mk_stmt (AilSblock ([], List.map mk_stmt [ if_stat; increment_stat ])),
+                mk_stmt (AilSblock ([], loop_body)),
                 0 ))
         in
         let ail_block =
-          A.(AilSblock ([ start_binding ], List.map mk_stmt [ start_assign; while_loop ]))
+          A.(
+            AilSblock
+              ( [ start_binding; end_binding ] @ b_start @ b_end,
+                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+              ))
         in
         ([], [ ail_block ])
       | _ ->
@@ -3233,31 +3275,49 @@ let cn_to_ail_resource
               ( mk_expr (AilEident (Sym.fresh "cn_map_set")),
                 List.map mk_expr [ AilEident sym; i_expr ] @ [ rhs ] ))
         in
-        let if_stat =
-          A.(
-            AilSif
-              ( wrap_with_convert_from_cn_bool if_cond_expr,
-                mk_stmt
-                  (AilSblock
-                     ( ptr_add_binding :: b4,
-                       List.map
-                         mk_stmt
-                         (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) )),
-                mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+        let loop_body =
+          match if_cond_expr_opt with
+          | Some if_cond_expr ->
+            let if_stat =
+              A.(
+                AilSif
+                  ( wrap_with_convert_from_cn_bool if_cond_expr,
+                    mk_stmt
+                      (AilSblock
+                         ( ptr_add_binding :: b4,
+                           List.map
+                             mk_stmt
+                             (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) )),
+                    mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+            in
+            List.map mk_stmt [ if_stat; increment_stat ]
+          | None ->
+            List.map
+              mk_stmt
+              [ A.(
+                  AilSblock
+                    ( ptr_add_binding :: b4,
+                      List.map
+                        mk_stmt
+                        (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) ));
+                increment_stat
+              ]
         in
         let while_loop =
           A.(
             AilSwhile
-              ( wrap_with_convert_from_cn_bool while_cond_expr,
-                mk_stmt A.(AilSblock ([], List.map mk_stmt [ if_stat; increment_stat ])),
-                0 ))
+              (wrap_with_convert_from_cn_bool while_cond_expr, mk_stmt A.(AilSblock ([], loop_body)), 0))
         in
         let ail_block =
-          A.(AilSblock ([ start_binding ], List.map mk_stmt [ start_assign; while_loop ]))
+          A.(
+            AilSblock
+              ( [ start_binding; end_binding ] @ b_start @ b_end,
+                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+              ))
         in
         ([ sym_binding ], [ sym_decl; ail_block ])
     in
-    (b1 @ b2 @ b3 @ bs' @ bs, s1 @ s2 @ s3 @ ss @ ss')
+    (b_if @ bs' @ bs, s_if @ ss @ ss')
 
 
 let cn_to_ail_logical_constraint_aux
@@ -4968,9 +5028,6 @@ let cn_to_ail_assume_resource
        Input is expr of the form:
         take sym = each (integer q.q; q.permission){ Owned(q.pointer + (q.q * q.step)) }
     *)
-    let b1, s1, _e1 =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.pointer PassBack
-    in
     (*
        Generating a loop of the form:
       <set q.q to start value>
@@ -4980,34 +5037,43 @@ let cn_to_ail_assume_resource
       }
     *)
     let i_sym, i_bt = q.q in
-    let start_expr, _, while_loop_cond = get_while_bounds_and_cond q.q q.permission in
-    let _, _, e_start =
+    let { start_expr; end_expr; interval_cond; upper_is_strict } =
+      get_quantified_loop_bounds q.q q.permission
+    in
+    let b_start, s_start, e_start =
       cn_to_ail_expr filename dts globals spec_mode_opt start_expr PassBack
+    in
+    let end_sym = Sym.fresh (Sym.pp_string i_sym ^ "_end") in
+    let end_it = IT.IT (IT.(Sym end_sym), i_bt, Cerb_location.unknown) in
+    let b_end, s_end, e_end =
+      cn_to_ail_expr filename dts globals spec_mode_opt end_expr PassBack
+    in
+    let i_it = IT.IT (IT.(Sym i_sym), i_bt, Cerb_location.unknown) in
+    let while_loop_cond =
+      if upper_is_strict then
+        IT.lt_ (i_it, end_it) Cerb_location.unknown
+      else
+        IT.le_ (i_it, end_it) Cerb_location.unknown
     in
     let _, _, while_cond_expr =
       cn_to_ail_expr filename dts globals spec_mode_opt while_loop_cond PassBack
     in
-    let _, _, if_cond_expr =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
+    let if_cond_expr_opt, b_if, s_if =
+      if quantified_permission_matches_interval q.permission interval_cond then
+        (None, [], [])
+      else (
+        let b_if, s_if, if_cond_expr =
+          cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
+        in
+        (Some if_cond_expr, b_if, s_if))
     in
     let cn_integer_ptr_ctype = bt_to_ail_ctype i_bt in
-    let b2, s2, _e2 =
-      cn_to_ail_expr filename dts globals spec_mode_opt q.permission PassBack
-    in
-    let b3, s3, _e3 =
-      cn_to_ail_expr
-        filename
-        dts
-        globals
-        spec_mode_opt
-        (IT.sizeOf_ q.step Cerb_location.unknown)
-        PassBack
-    in
     let start_binding = create_binding i_sym cn_integer_ptr_ctype in
+    let end_binding = create_binding end_sym cn_integer_ptr_ctype in
     let start_assign = A.(AilSdeclaration [ (i_sym, Some e_start) ]) in
+    let end_assign = A.(AilSdeclaration [ (end_sym, Some e_end) ]) in
     let return_ctype, _return_bt = calculate_return_type q.name in
     (* Translation of q.pointer *)
-    let i_it = IT.IT (IT.(Sym i_sym), i_bt, Cerb_location.unknown) in
     let value_it =
       IT.arrayShift_ ~base:q.pointer ~index:i_it q.step Cerb_location.unknown
     in
@@ -5078,25 +5144,40 @@ let cn_to_ail_assume_resource
       match rm_ctype return_ctype with
       | C.Void ->
         let void_pred_call = A.(AilSexpr rhs) in
-        let if_stat =
-          A.(
-            AilSif
-              ( wrap_with_convert_from_cn_bool if_cond_expr,
-                mk_stmt
-                  (AilSblock
-                     ( [ ptr_add_binding ],
-                       List.map mk_stmt [ ptr_add_stat; void_pred_call ] )),
-                mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+        let loop_body =
+          match if_cond_expr_opt with
+          | Some if_cond_expr ->
+            let if_stat =
+              A.(
+                AilSif
+                  ( wrap_with_convert_from_cn_bool if_cond_expr,
+                    mk_stmt
+                      (AilSblock
+                         ( ptr_add_binding :: b4,
+                           List.map mk_stmt (s4 @ [ ptr_add_stat; void_pred_call ]) )),
+                    mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+            in
+            List.map mk_stmt [ if_stat; increment_stat ]
+          | None ->
+            List.map
+              mk_stmt
+              [ A.(AilSblock (ptr_add_binding :: b4, List.map mk_stmt (s4 @ [ ptr_add_stat; void_pred_call ])));
+                increment_stat
+              ]
         in
         let while_loop =
           A.(
             AilSwhile
               ( wrap_with_convert_from_cn_bool while_cond_expr,
-                mk_stmt (AilSblock ([], List.map mk_stmt [ if_stat; increment_stat ])),
+                mk_stmt (AilSblock ([], loop_body)),
                 0 ))
         in
         let ail_block =
-          A.(AilSblock ([ start_binding ], List.map mk_stmt [ start_assign; while_loop ]))
+          A.(
+            AilSblock
+              ( [ start_binding; end_binding ] @ b_start @ b_end,
+                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+              ))
         in
         ([], [ ail_block ])
       | _ ->
@@ -5132,31 +5213,49 @@ let cn_to_ail_assume_resource
               ( mk_expr (AilEident (Sym.fresh "cn_map_set")),
                 List.map mk_expr [ AilEident sym; i_expr ] @ [ rhs ] ))
         in
-        let if_stat =
-          A.(
-            AilSif
-              ( wrap_with_convert_from_cn_bool if_cond_expr,
-                mk_stmt
-                  (AilSblock
-                     ( ptr_add_binding :: b4,
-                       List.map
-                         mk_stmt
-                         (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) )),
-                mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+        let loop_body =
+          match if_cond_expr_opt with
+          | Some if_cond_expr ->
+            let if_stat =
+              A.(
+                AilSif
+                  ( wrap_with_convert_from_cn_bool if_cond_expr,
+                    mk_stmt
+                      (AilSblock
+                         ( ptr_add_binding :: b4,
+                           List.map
+                             mk_stmt
+                             (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) )),
+                    mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) ))
+            in
+            List.map mk_stmt [ if_stat; increment_stat ]
+          | None ->
+            List.map
+              mk_stmt
+              [ A.(
+                  AilSblock
+                    ( ptr_add_binding :: b4,
+                      List.map
+                        mk_stmt
+                        (s4 @ [ ptr_add_stat; AilSexpr (mk_expr map_set_expr_) ]) ));
+                increment_stat
+              ]
         in
         let while_loop =
           A.(
             AilSwhile
-              ( wrap_with_convert_from_cn_bool while_cond_expr,
-                mk_stmt A.(AilSblock ([], List.map mk_stmt [ if_stat; increment_stat ])),
-                0 ))
+              (wrap_with_convert_from_cn_bool while_cond_expr, mk_stmt A.(AilSblock ([], loop_body)), 0))
         in
         let ail_block =
-          A.(AilSblock ([ start_binding ], List.map mk_stmt [ start_assign; while_loop ]))
+          A.(
+            AilSblock
+              ( [ start_binding; end_binding ] @ b_start @ b_end,
+                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+              ))
         in
         ([ sym_binding ], [ sym_decl; ail_block ])
     in
-    (b1 @ b2 @ b3 @ bs' @ bs, s1 @ s2 @ s3 @ ss @ ss')
+    (b_if @ bs' @ bs, s_if @ ss @ ss')
 
 
 let rec cn_to_ail_assume_lat filename dts pred_sym_opt globals preds spec_mode_opt
