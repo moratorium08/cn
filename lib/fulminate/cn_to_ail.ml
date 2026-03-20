@@ -2913,6 +2913,14 @@ let quantified_permission_matches_interval permission interval_cond =
   && List.for_all2 IT.equal permission_clauses interval_clauses
 
 
+let is_zero_numeric_it it =
+  let simp_ctxt = Simplify.default Global.empty in
+  match Simplify.IndexTerms.simp simp_ctxt it with
+  | IT (Const (Z n), _, _) -> Z.equal n Z.zero
+  | IT (Const (Bits (_, n)), _, _) -> Z.equal n Z.zero
+  | _ -> false
+
+
 let get_quantified_loop_bounds (i_sym, i_bt) it =
   let loc = Cerb_location.unknown in
   let i_it = IT.IT (IT.(Sym i_sym), i_bt, loc) in
@@ -2936,6 +2944,9 @@ let get_quantified_loop_bounds (i_sym, i_bt) it =
   in
   let start_cond =
     match raw_start_expr with
+    | _ when BT.equal_sign (fst (Option.get (BT.is_bits_bt i_bt))) BT.Unsigned
+             && is_zero_numeric_it raw_start_expr ->
+      IT.bool_ true loc
     | IT (Binop (Add, start_expr', IT (Const (Bits (_, n)), _, _)), _, _)
       when Z.equal n Z.one ->
       IT.lt_ (start_expr', i_it) loc
@@ -2970,7 +2981,111 @@ let get_quantified_loop_bounds (i_sym, i_bt) it =
     upper_is_strict
   }
 
+
+let cn_pointer_ptr_expr ptr_sym =
+  let here = Locations.other __LOC__ in
+  mk_expr A.(AilEmemberofptr (mk_expr (AilEident ptr_sym), Id.make here "ptr"))
+
+
+let owned_value_expr_from_cn_pointer ptr_sym sct =
+  let cast_expr =
+    mk_expr
+      A.(
+        AilEcast
+          ( C.no_qualifiers,
+            mk_ctype C.(Pointer (C.no_qualifiers, Sctypes.to_ctype sct)),
+            cn_pointer_ptr_expr ptr_sym ))
+  in
+  let deref_expr_ = A.(AilEunary (Indirection, cast_expr)) in
+  let bt = BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct in
+  mk_expr (wrap_with_convert_to ~sct deref_expr_ bt)
+
+
+let convert_from_cn_numeric_expr bt e =
+  match get_conversion_from_fn_str bt with
+  | Some fn_name ->
+    mk_expr A.(AilEcall (mk_expr (AilEident (Sym.fresh fn_name)), [ e ]))
+  | None -> e
+
+
+let has_contiguous_owned_range_fast_path q interval_cond =
+  match q.Request.QPredicate.name with
+  | Request.Owned (sct, _) ->
+    quantified_permission_matches_interval q.permission interval_cond
+    && Sctypes.equal q.step sct
+  | PName _ -> false
+
+
+let gen_contiguous_owned_range_setup
+      ~without_ownership_checking
+      filename
+      dts
+      globals
+      spec_mode_opt
+      while_cond_expr
+      base
+      step
+      start_it
+      i_it
+      end_it
+      i_bt
+      upper_is_strict
+      owned_sct
+      ownership_stmt
+  =
+  if without_ownership_checking then
+    []
+  else (
+    let loc = Cerb_location.unknown in
+    let start_ptr_it =
+      if is_zero_numeric_it start_it then
+        base
+      else
+        IT.arrayShift_ ~base ~index:start_it step loc
+    in
+    let b_start_ptr, s_start_ptr, e_start_ptr =
+      cn_to_ail_expr filename dts globals spec_mode_opt start_ptr_it PassBack
+    in
+    let element_count_it =
+      let diff = IT.sub_ (end_it, i_it) loc in
+      if upper_is_strict then diff else IT.add_ (diff, IT.num_lit_ Z.one i_bt loc) loc
+    in
+    let b_count, s_count, e_count =
+      cn_to_ail_expr filename dts globals spec_mode_opt element_count_it PassBack
+    in
+    let range_ptr_sym = Sym.fresh_anon () in
+    let range_size_sym = Sym.fresh "owned_range_size" in
+    let cn_pointer_return_type = bt_to_ail_ctype BT.(Loc ()) in
+    let range_ptr_binding = create_binding range_ptr_sym cn_pointer_return_type in
+    let range_size_ctype = mk_ctype C.(Basic (Integer (Unsigned Long))) in
+    let range_size_binding = create_binding range_size_sym range_size_ctype in
+    let range_size_rhs =
+      let native_count_expr = convert_from_cn_numeric_expr i_bt e_count in
+      mk_expr
+        A.(
+          AilEbinary
+            ( mk_expr (AilEcast (C.no_qualifiers, range_size_ctype, native_count_expr)),
+              Arithmetic Mul,
+              mk_expr (AilEsizeof (C.no_qualifiers, Sctypes.to_ctype owned_sct)) ))
+    in
+    let range_ptr_decl = A.(AilSdeclaration [ (range_ptr_sym, Some e_start_ptr) ]) in
+    let range_size_decl = A.(AilSdeclaration [ (range_size_sym, Some range_size_rhs) ]) in
+    let setup_block =
+      A.(
+        AilSblock
+          ( [ range_ptr_binding; range_size_binding ] @ b_start_ptr @ b_count,
+            List.map
+              mk_stmt
+              (s_start_ptr @ s_count @ [ range_ptr_decl; range_size_decl; ownership_stmt range_ptr_sym range_size_sym ]) ))
+    in
+    [ A.(
+        AilSif
+          ( wrap_with_convert_from_cn_bool while_cond_expr,
+            mk_stmt setup_block,
+            mk_stmt (AilSblock ([], [ mk_stmt AilSskip ])) )) ])
+
 let cn_to_ail_resource
+      ~without_ownership_checking
       filename
       sym
       dts
@@ -3154,31 +3269,73 @@ let cn_to_ail_resource
     let cn_pointer_return_type = bt_to_ail_ctype BT.(Loc ()) in
     let ptr_add_binding = create_binding ptr_add_sym cn_pointer_return_type in
     let ptr_add_stat = A.(AilSdeclaration [ (ptr_add_sym, Some e4) ]) in
+    let contiguous_owned_range_stmts, contiguous_owned_rhs_opt =
+      match q.name with
+      | Owned (sct, _) when has_contiguous_owned_range_fast_path q interval_cond ->
+        let ownership_stmt range_ptr_sym range_size_sym =
+          let loop_ownership_expr =
+            match loop_ownership_sym_opt with
+            | Some loop_ownership_sym -> A.AilEident loop_ownership_sym
+            | None -> ail_zero_const_expr_
+          in
+          A.(
+            AilSexpr
+              (mk_expr
+                 (AilEcall
+                    ( mk_expr (AilEident (Sym.fresh "cn_get_or_put_ownership")),
+                      [ mk_expr (AilEident enum_sym);
+                        cn_pointer_ptr_expr range_ptr_sym;
+                        mk_expr (AilEident range_size_sym);
+                        mk_expr loop_ownership_expr
+                      ] ))))
+        in
+        ( gen_contiguous_owned_range_setup
+            ~without_ownership_checking
+            filename
+            dts
+            globals
+            spec_mode_opt
+            while_cond_expr
+            q.pointer
+            q.step
+            start_expr
+            i_it
+            end_it
+            i_bt
+            upper_is_strict
+            sct
+            ownership_stmt,
+          Some (owned_value_expr_from_cn_pointer ptr_add_sym sct) )
+      | _ -> ([], None)
+    in
     let rhs, bs, ss =
       match q.name with
       | Owned (sct, _) ->
         ownership_ctypes := Sctypes.to_ctype sct :: !ownership_ctypes;
-        let owned_fn_name = generate_owned_fn_name sct in
-        let ptr_add_it = IT.(IT (Sym ptr_add_sym, BT.(Loc ()), Cerb_location.unknown)) in
-        (* Hack with enum as sym *)
-        let enum_val_get = IT.(IT (Sym enum_sym, BT.Integer, Cerb_location.unknown)) in
-        let loop_ownership_arg =
-          match loop_ownership_sym_opt with
-          | Some loop_ownership_sym ->
-            IT.(IT (Sym loop_ownership_sym, BT.Integer, Cerb_location.unknown))
-          | None -> it_zero_const
-        in
-        let fn_call_it =
-          IT.IT
-            ( Apply
-                (Sym.fresh owned_fn_name, [ ptr_add_it; enum_val_get; loop_ownership_arg ]),
-              BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct,
-              Cerb_location.unknown )
-        in
-        let bs', ss', e' =
-          cn_to_ail_expr filename dts globals spec_mode_opt fn_call_it PassBack
-        in
-        (e', bs', ss')
+        (match contiguous_owned_rhs_opt with
+         | Some rhs -> (rhs, [], [])
+         | None ->
+           let owned_fn_name = generate_owned_fn_name sct in
+           let ptr_add_it = IT.(IT (Sym ptr_add_sym, BT.(Loc ()), Cerb_location.unknown)) in
+           (* Hack with enum as sym *)
+           let enum_val_get = IT.(IT (Sym enum_sym, BT.Integer, Cerb_location.unknown)) in
+           let loop_ownership_arg =
+             match loop_ownership_sym_opt with
+             | Some loop_ownership_sym ->
+               IT.(IT (Sym loop_ownership_sym, BT.Integer, Cerb_location.unknown))
+             | None -> it_zero_const
+           in
+           let fn_call_it =
+             IT.IT
+               ( Apply
+                   (Sym.fresh owned_fn_name, [ ptr_add_it; enum_val_get; loop_ownership_arg ]),
+                 BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct,
+                 Cerb_location.unknown )
+           in
+           let bs', ss', e' =
+             cn_to_ail_expr filename dts globals spec_mode_opt fn_call_it PassBack
+           in
+           (e', bs', ss'))
       | PName pname ->
         let bs, ss, es =
           list_split_three
@@ -3248,7 +3405,13 @@ let cn_to_ail_resource
           A.(
             AilSblock
               ( [ start_binding; end_binding ] @ b_start @ b_end,
-                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+                List.map
+                  mk_stmt
+                  (s_start
+                  @ s_end
+                  @ [ start_assign; end_assign ]
+                  @ contiguous_owned_range_stmts
+                  @ [ while_loop ])
               ))
         in
         ([], [ ail_block ])
@@ -3322,7 +3485,13 @@ let cn_to_ail_resource
           A.(
             AilSblock
               ( [ start_binding; end_binding ] @ b_start @ b_end,
-                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+                List.map
+                  mk_stmt
+                  (s_start
+                  @ s_end
+                  @ [ start_assign; end_assign ]
+                  @ contiguous_owned_range_stmts
+                  @ [ while_loop ])
               ))
         in
         ([ sym_binding ], [ sym_decl; ail_block ])
@@ -3640,6 +3809,7 @@ let rec cn_to_ail_lat filename dts pred_sym_opt globals preds spec_mode_opt = fu
     let pop_s = generate_cn_pop_msg_info in
     let b1, s1 =
       cn_to_ail_resource
+        ~without_ownership_checking:false
         filename
         name
         dts
@@ -3793,7 +3963,14 @@ let cn_to_ail_predicates preds filename dts globals cn_preds
 
 
 (* TODO: Add destination passing? *)
-let rec cn_to_ail_post_aux filename dts globals preds spec_mode_opt = function
+let rec cn_to_ail_post_aux
+          ~without_ownership_checking
+          filename
+          dts
+          globals
+          preds
+          spec_mode_opt
+  = function
   | LRT.Define ((name, it), (_loc, _), t) ->
     let new_name = generate_sym_with_suffix ~suffix:"_cn" name in
     let new_lrt =
@@ -3804,17 +3981,45 @@ let rec cn_to_ail_post_aux filename dts globals preds spec_mode_opt = function
     let b1, s1 =
       cn_to_ail_expr filename dts globals spec_mode_opt it (AssignVar new_name)
     in
-    let b2, s2 = cn_to_ail_post_aux filename dts globals preds spec_mode_opt new_lrt in
+    let b2, s2 =
+      cn_to_ail_post_aux
+        ~without_ownership_checking
+        filename
+        dts
+        globals
+        preds
+        spec_mode_opt
+        new_lrt
+    in
     (b1 @ b2 @ [ binding ], (decl :: s1) @ s2)
   | LRT.Resource ((name, (re, bt)), (loc, _str_opt), t) ->
     let new_name = generate_sym_with_suffix ~suffix:"_cn" name in
     let upd_s = generate_error_msg_info_update_stats ~cn_source_loc_opt:(Some loc) () in
     let pop_s = generate_cn_pop_msg_info in
     let b1, s1 =
-      cn_to_ail_resource filename new_name dts globals preds None spec_mode_opt loc re
+      cn_to_ail_resource
+        ~without_ownership_checking
+        filename
+        new_name
+        dts
+        globals
+        preds
+        None
+        spec_mode_opt
+        loc
+        re
     in
     let new_lrt = LogicalReturnTypes.subst (ESE.sym_subst (name, bt, new_name)) t in
-    let b2, s2 = cn_to_ail_post_aux filename dts globals preds spec_mode_opt new_lrt in
+    let b2, s2 =
+      cn_to_ail_post_aux
+        ~without_ownership_checking
+        filename
+        dts
+        globals
+        preds
+        spec_mode_opt
+        new_lrt
+    in
     (b1 @ b2, upd_s @ s1 @ pop_s @ s2)
   | LRT.Constraint (lc, (loc, _str_opt), t) ->
     let b1, s, e = cn_to_ail_logical_constraint filename dts globals spec_mode_opt lc in
@@ -3828,19 +4033,38 @@ let rec cn_to_ail_post_aux filename dts globals preds spec_mode_opt = function
         upd_s @ s @ (assert_stmt :: pop_s)
       | None -> s
     in
-    let b2, s2 = cn_to_ail_post_aux filename dts globals preds spec_mode_opt t in
+    let b2, s2 =
+      cn_to_ail_post_aux
+        ~without_ownership_checking
+        filename
+        dts
+        globals
+        preds
+        spec_mode_opt
+        t
+    in
     (b1 @ b2, ss @ s2)
   | LRT.I -> ([], [])
 
 
 let cn_to_ail_post
+      ~without_ownership_checking
       filename
       dts
       globals
       preds
       (ReturnTypes.Computational (_bound, _oinfo, t))
   =
-  let bs, ss = cn_to_ail_post_aux filename dts globals preds (Some Post) t in
+  let bs, ss =
+    cn_to_ail_post_aux
+      ~without_ownership_checking
+      filename
+      dts
+      globals
+      preds
+      (Some Post)
+      t
+  in
   (bs, List.map mk_stmt ss)
 
 
@@ -4139,6 +4363,7 @@ let rec cn_to_ail_lat_internal_loop
     let pop_s = generate_cn_pop_msg_info in
     let b1, s1 =
       cn_to_ail_resource
+        ~without_ownership_checking:false
         filename
         name
         dts
@@ -4445,7 +4670,17 @@ let rec cn_to_ail_lat_2
     let pop_s = generate_cn_pop_msg_info in
     let new_name = generate_sym_with_suffix ~suffix:"_cn" name in
     let b1, s1 =
-      cn_to_ail_resource filename new_name dts globals preds None spec_mode_opt loc ret
+      cn_to_ail_resource
+        ~without_ownership_checking
+        filename
+        new_name
+        dts
+        globals
+        preds
+        None
+        spec_mode_opt
+        loc
+        ret
     in
     let new_lat = ESE.fn_largs_and_body_subst (ESE.sym_subst (name, bt, new_name)) lat in
     let ail_executable_spec =
@@ -4552,7 +4787,9 @@ let rec cn_to_ail_lat_2
         loop
     in
     let ail_loop_invariants = List.filter_map Fun.id ail_loop_invariants in
-    let post_bs, post_ss = cn_to_ail_post filename dts globals preds post in
+    let post_bs, post_ss =
+      cn_to_ail_post ~without_ownership_checking filename dts globals preds post
+    in
     let ownership_stats_ =
       if without_ownership_checking then
         []
@@ -5118,32 +5355,70 @@ let cn_to_ail_assume_resource
     let cn_pointer_return_type = bt_to_ail_ctype BT.(Loc ()) in
     let ptr_add_binding = create_binding ptr_add_sym cn_pointer_return_type in
     let ptr_add_stat = A.(AilSdeclaration [ (ptr_add_sym, Some e4) ]) in
+    let contiguous_owned_range_stmts, contiguous_owned_rhs_opt =
+      match q.name with
+      | Owned (sct, _) when has_contiguous_owned_range_fast_path q interval_cond ->
+        let ownership_stmt range_ptr_sym range_size_sym =
+          A.(
+            AilSexpr
+              (mk_expr
+                 (AilEcall
+                    ( mk_expr (AilEident (Sym.fresh "cn_assume_ownership")),
+                      [ cn_pointer_ptr_expr range_ptr_sym;
+                        mk_expr (AilEident range_size_sym);
+                        mk_expr
+                          (AilEident
+                             (Sym.fresh ("(char*)" ^ "\"" ^ Sym.pp_string sym ^ "\"")))
+                      ] ))))
+        in
+        ( gen_contiguous_owned_range_setup
+            ~without_ownership_checking:false
+            filename
+            dts
+            globals
+            spec_mode_opt
+            while_cond_expr
+            q.pointer
+            q.step
+            start_expr
+            i_it
+            end_it
+            i_bt
+            upper_is_strict
+            sct
+            ownership_stmt,
+          Some (owned_value_expr_from_cn_pointer ptr_add_sym sct) )
+      | _ -> ([], None)
+    in
     let rhs, bs, ss, _owned_ctype =
       match q.name with
       | Owned (sct, _) ->
         ownership_ctypes := Sctypes.to_ctype sct :: !ownership_ctypes;
-        let sct_str = str_of_ctype (Sctypes.to_ctype sct) in
-        let sct_str = String.concat "_" (String.split_on_char ' ' sct_str) in
-        let owned_fn_name = "assume_owned_" ^ sct_str in
-        let ptr_add_it = IT.(IT (Sym ptr_add_sym, BT.(Loc ()), Cerb_location.unknown)) in
-        (* Hack with enum as sym *)
-        let fn_call_it =
-          IT.IT
-            ( Apply
-                ( Sym.fresh owned_fn_name,
-                  [ ptr_add_it;
-                    IT.sym_
-                      ( Sym.fresh ("(char*)" ^ "\"" ^ Sym.pp_string sym ^ "\""),
-                        BT.Unit,
-                        Locations.other __LOC__ )
-                  ] ),
-              BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct,
-              Cerb_location.unknown )
-        in
-        let bs', ss', e' =
-          cn_to_ail_expr filename dts globals spec_mode_opt fn_call_it PassBack
-        in
-        (e', bs', ss', Some (Sctypes.to_ctype sct))
+        (match contiguous_owned_rhs_opt with
+         | Some rhs -> (rhs, [], [], Some (Sctypes.to_ctype sct))
+         | None ->
+           let sct_str = str_of_ctype (Sctypes.to_ctype sct) in
+           let sct_str = String.concat "_" (String.split_on_char ' ' sct_str) in
+           let owned_fn_name = "assume_owned_" ^ sct_str in
+           let ptr_add_it = IT.(IT (Sym ptr_add_sym, BT.(Loc ()), Cerb_location.unknown)) in
+           (* Hack with enum as sym *)
+           let fn_call_it =
+             IT.IT
+               ( Apply
+                   ( Sym.fresh owned_fn_name,
+                     [ ptr_add_it;
+                       IT.sym_
+                         ( Sym.fresh ("(char*)" ^ "\"" ^ Sym.pp_string sym ^ "\""),
+                           BT.Unit,
+                           Locations.other __LOC__ )
+                     ] ),
+                 BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct,
+                 Cerb_location.unknown )
+           in
+           let bs', ss', e' =
+             cn_to_ail_expr filename dts globals spec_mode_opt fn_call_it PassBack
+           in
+           (e', bs', ss', Some (Sctypes.to_ctype sct)))
       | PName pname ->
         let bs, ss, es =
           list_split_three
@@ -5210,7 +5485,13 @@ let cn_to_ail_assume_resource
           A.(
             AilSblock
               ( [ start_binding; end_binding ] @ b_start @ b_end,
-                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+                List.map
+                  mk_stmt
+                  (s_start
+                  @ s_end
+                  @ [ start_assign; end_assign ]
+                  @ contiguous_owned_range_stmts
+                  @ [ while_loop ])
               ))
         in
         ([], [ ail_block ])
@@ -5284,7 +5565,13 @@ let cn_to_ail_assume_resource
           A.(
             AilSblock
               ( [ start_binding; end_binding ] @ b_start @ b_end,
-                List.map mk_stmt (s_start @ s_end @ [ start_assign; end_assign; while_loop ])
+                List.map
+                  mk_stmt
+                  (s_start
+                  @ s_end
+                  @ [ start_assign; end_assign ]
+                  @ contiguous_owned_range_stmts
+                  @ [ while_loop ])
               ))
         in
         ([ sym_binding ], [ sym_decl; ail_block ])
