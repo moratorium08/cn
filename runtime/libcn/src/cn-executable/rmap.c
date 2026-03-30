@@ -479,6 +479,40 @@ void rmap_remove(rmap_key_t k0, rmap_key_t k1, rmap map) {
   put_leaf(0, k0, k1, &newn, &map->root, map);
 }
 
+/* rmap_foreach: iterate over all non-empty leaf ranges */
+
+static void foreach_node(
+    rmap_key_t addr, bits_t bits, struct node node, rmap_foreach_cb cb, void *ctx, rmap map) {
+  switch (node.state) {
+    case EMPTY:
+      return;
+    case LEAF:
+      cb(min_key(bits, addr), max_key(bits, addr), node.leaf, ctx);
+      return;
+    case INNER:
+      for (size_t i = 0; i < asize(map); i++) {
+        rmap_key_t addr1 =
+            ((i & mask(map->radix)) << (KEY_BITS - bits - map->radix)) | addr;
+        foreach_node(addr1, bits + map->radix, node.inner.children[i], cb, ctx, map);
+      }
+      return;
+    case SKIP: {
+      rmap_key_t addr1 = ((node.skip.path & mask(node.skip.radix))
+                             << (KEY_BITS - bits - node.skip.radix)) |
+                         addr;
+      foreach_node(addr1, bits + node.skip.radix, node.skip.child[0], cb, ctx, map);
+      return;
+    }
+    default:
+      assert(false);
+  }
+}
+
+void rmap_foreach(rmap map, rmap_foreach_cb cb, void *ctx) {
+  if (map != NULL && map->root.state != EMPTY)
+    foreach_node(0, 0, map->root, cb, ctx, map);
+}
+
 #ifdef _RMAP_DEBUG
 
 static bool node_is_wf_1(struct node node, rmap map) {
