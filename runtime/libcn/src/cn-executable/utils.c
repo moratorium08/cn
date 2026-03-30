@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <cn-executable/bi_abduction.h>
 #include <cn-executable/rmap.h>
 #include <cn-executable/utils.h>
 
@@ -196,6 +197,9 @@ _Bool convert_from_cn_bool(cn_bool* b) {
 void cn_assert(cn_bool* cn_b, enum spec_mode spec_mode) {
   // cn_printf(CN_LOGGING_INFO, "[CN: assertion] function %s, file %s, line %d\n", error_msg_info.function_name, error_msg_info.file_name, error_msg_info.line_number);
   if (!(cn_b->val)) {
+    if (cn_abd_is_enabled()) {
+      return;  /* In bi-abductive mode, skip assertion failures */
+    }
     print_error_msg_info(global_error_msg_info);
     cn_failure(CN_FAILURE_ASSERT, spec_mode);
   }
@@ -285,9 +289,26 @@ void ghost_stack_depth_decr(void) {
   // cn_printf(CN_LOGGING_INFO, "\n");
 }
 
+/* Callback for rmap_foreach used in bi-abductive leak check */
+static void abd_leak_collect_cb(
+    rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx) {
+  signed long depth = *(signed long *)ctx;
+  if (v > depth) {
+    for (rmap_key_t addr = k0; addr <= k1; addr++) {
+      cn_abd_record_missing(addr, 1);
+    }
+  }
+}
+
 void cn_postcondition_leak_check(void) {
   rmap_range_res_t res = rmap_find_range(0UL, -1UL, cn_ownership_global_ghost_state);
   if (res.defined && res.max > cn_stack_depth) {
+    if (cn_abd_is_enabled()) {
+      /* Collect leaked addresses instead of failing */
+      rmap_foreach(cn_ownership_global_ghost_state, abd_leak_collect_cb,
+          &cn_stack_depth);
+      return;
+    }
     print_error_msg_info(global_error_msg_info);
     // XXX TODO: scan for the failing address
     // cn_printf(CN_LOGGING_ERROR,
@@ -525,6 +546,20 @@ enum region_owned c_ownership_check(
       return FULL_WILDCARD;
     else if (res.max == expected_stack_depth)
       return NO_WILDCARD;
+  }
+
+  /* Bi-abductive mode: record missing ownership and grant it */
+  if (cn_abd_is_enabled()) {
+    for (size_t addr = address; addr < address + size; addr++) {
+      int depth = ownership_ghost_state_get(addr);
+      if (depth != expected_stack_depth && depth != WILDCARD_DEPTH) {
+        cn_abd_record_missing(addr, 1);
+      }
+    }
+    /* Grant ownership for the entire region */
+    ownership_ghost_state_set(
+        address, size, expected_stack_depth, global_error_msg_info);
+    return NO_WILDCARD;
   }
 
   for (size_t addr = address; addr < address + size; addr++) {
