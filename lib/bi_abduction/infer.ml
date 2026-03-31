@@ -24,27 +24,27 @@ type inferred_spec =
   }
 
 (** Analyse which variable addresses overlap with missing address sets.
-    For each variable, count how many contiguous bytes starting from
-    the variable's address appear in the missing set. *)
+    For each variable, count missing bytes within a reasonable range
+    of the variable's address (up to 4096 bytes forward, covering typical
+    struct sizes and linked structures). *)
 let analyse_missing_vars
       (vars : Data_point.var_binding list)
       (missing : Data_point.missing_entry list)
   : address_analysis list
   =
   let missing_addrs = Data_point.missing_addr_set missing in
+  let max_range = 4096 in
   StdList.filter_map
     (fun (v : Data_point.var_binding) ->
-       (* Count contiguous missing bytes starting at v.value *)
-       let rec count_contiguous offset =
+       (* Count missing bytes in [v.value, v.value + max_range) *)
+       let count = ref 0 in
+       for offset = 0 to max_range - 1 do
          let addr = Int64.add v.value (Int64.of_int offset) in
          if Int64Set.mem addr missing_addrs then
-           count_contiguous (offset + 1)
-         else
-           offset
-       in
-       let n = count_contiguous 0 in
-       if n > 0 then
-         Some { var_name = v.name; var_addr = v.value; missing_range = n }
+           count := !count + 1
+       done;
+       if !count > 0 then
+         Some { var_name = v.name; var_addr = v.value; missing_range = !count }
        else
          None)
     vars
