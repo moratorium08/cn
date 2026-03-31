@@ -7,13 +7,47 @@
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
 
+type address_analysis =
+  { var_name : string;
+    var_addr : int64;
+    missing_range : int  (* number of contiguous missing bytes from var_addr *)
+  }
+
 type inferred_spec =
   { function_name : string;
     pre_qualifiers : Qualifier.t list;
     post_qualifiers : Qualifier.t list;
     pre_uncovered : Int64Set.t;
-    post_uncovered : Int64Set.t
+    post_uncovered : Int64Set.t;
+    pre_analysis : address_analysis list;
+    post_analysis : address_analysis list
   }
+
+(** Analyse which variable addresses overlap with missing address sets.
+    For each variable, count how many contiguous bytes starting from
+    the variable's address appear in the missing set. *)
+let analyse_missing_vars
+      (vars : Data_point.var_binding list)
+      (missing : Data_point.missing_entry list)
+  : address_analysis list
+  =
+  let missing_addrs = Data_point.missing_addr_set missing in
+  StdList.filter_map
+    (fun (v : Data_point.var_binding) ->
+       (* Count contiguous missing bytes starting at v.value *)
+       let rec count_contiguous offset =
+         let addr = Int64.add v.value (Int64.of_int offset) in
+         if Int64Set.mem addr missing_addrs then
+           count_contiguous (offset + 1)
+         else
+           offset
+       in
+       let n = count_contiguous 0 in
+       if n > 0 then
+         Some { var_name = v.name; var_addr = v.value; missing_range = n }
+       else
+         None)
+    vars
 
 (** Build struct layouts from struct definitions.
     Maps struct tag → list of (field_id, byte_offset, byte_size). *)
@@ -117,11 +151,22 @@ let infer_function
       candidates
   in
   let post_result = Cover.cover ~must_cover:post_must ~candidates:post_candidates in
+  (* Analyse which variables' memory ranges are missing *)
+  let pre_analysis =
+    analyse_missing_vars representative_dp.Data_point.pre_vars
+      representative_dp.pre_missing
+  in
+  let post_analysis =
+    analyse_missing_vars representative_dp.pre_vars
+      representative_dp.post_missing
+  in
   { function_name = func_name;
     pre_qualifiers = pre_result.selected;
     post_qualifiers = post_result.selected;
     pre_uncovered = pre_result.uncovered;
-    post_uncovered = post_result.uncovered
+    post_uncovered = post_result.uncovered;
+    pre_analysis;
+    post_analysis
   }
 
 (** Main entry point: run inference on execution data. *)
@@ -166,6 +211,20 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
                 (fun q -> string "  take _ = " ^^ Qualifier.pp q ^^ semi)
                 spec.post_qualifiers)
        in
+       let analysis_doc label analyses =
+         match analyses with
+         | [] -> Pp.empty
+         | _ ->
+           hardline ^^
+           string (Printf.sprintf "  /* %s address analysis: */" label) ^^ hardline ^^
+           separate hardline
+             (StdList.map
+                (fun (a : address_analysis) ->
+                   string (Printf.sprintf
+                     "  /*   %s (0x%Lx): %d bytes missing -> likely needs Owned<_>(%s) */"
+                     a.var_name a.var_addr a.missing_range a.var_name))
+                analyses)
+       in
        let uncov_doc =
          let pre_n = Int64Set.cardinal spec.pre_uncovered in
          let post_n = Int64Set.cardinal spec.post_uncovered in
@@ -177,7 +236,10 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
              pre_n post_n)
        in
        string (Printf.sprintf "/* Function: %s */" spec.function_name) ^^
-       hardline ^^ pre_doc ^^ post_doc ^^ uncov_doc)
+       hardline ^^ pre_doc ^^ post_doc ^^
+       analysis_doc "Pre" spec.pre_analysis ^^
+       analysis_doc "Post" spec.post_analysis ^^
+       uncov_doc)
     specs
   |> separate (hardline ^^ hardline)
 

@@ -273,6 +273,22 @@ let generate_c_specs_internal
     else
       []
   in
+  (* Record function arguments for bi-abductive inference *)
+  let abd_record_args =
+    if bi_abductive then
+      match List.assoc_opt CF.Symbol.equal_sym instrumentation.fn
+              sigm.A.function_definitions with
+      | Some (_, _, _, param_syms, _) ->
+        List.map (fun param_sym ->
+          let name = Sym.pp_string param_sym in
+          Printf.sprintf
+            "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s), \"auto\");\n"
+            name name name)
+          param_syms
+      | None -> []
+    else
+      []
+  in
   let abd_mark_post =
     if bi_abductive then
       [ "\tcn_abd_mark_post();\n" ]
@@ -285,7 +301,7 @@ let generate_c_specs_internal
     else
       []
   in
-  let pre_strs = abd_push @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post in
+  let pre_strs = abd_push @ abd_record_args @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post in
   let post_strs = exit_strs @ cn_spec_inj_info.post_str @ abd_pop in
   ( [ ( instrumentation.fn,
         (pre_strs, post_strs) )
