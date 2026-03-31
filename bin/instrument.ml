@@ -102,6 +102,7 @@ let generate_executable_specs
       experimental_ownership_stack_mode
       experimental_unions
       experimental_curly_braces
+      bi_abductive
       mktemp
       print_steps
       max_bump_blocks
@@ -173,6 +174,7 @@ let generate_executable_specs
                 ~experimental_ownership_stack_mode
                 ~experimental_curly_braces
                 ~with_testing
+                ~bi_abductive
                 ~skip_and_only:(skip, only)
                 ?max_bump_blocks
                 ?bump_block_size
@@ -369,6 +371,14 @@ module Flags = struct
        execution"
     in
     Arg.(value & flag & info [ "correct-missing-ownership" ] ~doc)
+
+  let bi_abductive =
+    let doc =
+      "Enable bi-abductive execution mode. Instead of failing on ownership \
+       violations, record missing ownership and continue. Outputs \
+       cn_abd_summary.json and cn_abd_heap.jsonl."
+    in
+    Arg.(value & flag & info [ "bi-abd" ] ~doc)
 end
 
 let cmd =
@@ -412,6 +422,7 @@ let cmd =
     $ Flags.experimental_ownership_stack_mode
     $ Flags.experimental_unions
     $ Flags.experimental_curly_braces
+    $ Flags.bi_abductive
     $ Flags.mktemp
     $ Flags.print_steps
     $ Flags.max_bump_blocks
