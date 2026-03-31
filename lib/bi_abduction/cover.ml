@@ -93,6 +93,10 @@ let exact_cover
           best := { selected; uncovered = Int64Set.empty }
       end else if idx >= n then
         ()
+      else if Int64Set.is_empty !best.uncovered
+              && StdList.length chosen >= StdList.length !best.selected then
+        (* Prune: already have a complete cover at least as small *)
+        ()
       else begin
         (* Try including candidate idx *)
         let c = candidates_arr.(idx) in

@@ -147,10 +147,10 @@ let parse_heap_jsonl (filename : string) : heap_dump list =
       else
         read_lines (parse_heap_dump_line line :: acc)
     | exception End_of_file ->
-      close_in ic;
       StdList.rev acc
   in
-  read_lines []
+  Fun.protect ~finally:(fun () -> close_in ic)
+    (fun () -> read_lines [])
 
 (* --- Grouping --- *)
 
@@ -176,7 +176,14 @@ module Int64Set = Set.Make (Int64)
 
 let missing_addr_set (entries : missing_entry list) : Int64Set.t =
   StdList.fold_left
-    (fun acc (e : missing_entry) -> Int64Set.add e.addr acc)
+    (fun acc (e : missing_entry) ->
+       let rec add_range set offset =
+         if offset >= e.size then set
+         else
+           let a = Int64.add e.addr (Int64.of_int offset) in
+           add_range (Int64Set.add a set) (offset + 1)
+       in
+       add_range acc 0)
     Int64Set.empty
     entries
 
