@@ -219,6 +219,7 @@ let run_tests
            ~experimental_ownership_stack_mode
            ~experimental_curly_braces:false
            ~with_testing:true
+           ~bi_abductive:false
            ~skip_and_only:(skip_fulminate, only_fulminate)
            ?max_bump_blocks
            ?bump_block_size

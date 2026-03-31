@@ -8,11 +8,14 @@
 #include <string.h>
 
 #include <cn-executable/bi_abduction.h>
-#include <cn-executable/bump_alloc.h>
 
-/* Allocator: use the bump allocator (same as the rest of the Fulminate runtime) */
+/* Allocator: use stdlib malloc (not bump allocator) because bi-abductive state
+   must persist beyond cn_bump_free_after which reclaims per-function bump memory. */
+static void *abd_malloc(size_t sz) { return malloc(sz); }
+static void *abd_calloc(size_t n, size_t sz) { return calloc(n, sz); }
+static void abd_free_noop(void *p) { (void)p; /* leaked intentionally; short-lived process */ }
 static allocator abd_alloc = (allocator){
-    .malloc = &cn_bump_malloc, .calloc = &cn_bump_calloc, .free = &cn_bump_free};
+    .malloc = &abd_malloc, .calloc = &abd_calloc, .free = &abd_free_noop};
 
 /* Global state */
 static bool abd_enabled = false;
@@ -58,7 +61,7 @@ void cn_abd_push_frame(const char *func_name) {
   if (!abd_enabled)
     return;
 
-  cn_abd_frame *frame = cn_bump_malloc(sizeof(cn_abd_frame));
+  cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
   frame->function_name = func_name;
   frame->missing = ht_create(&abd_alloc);
   frame->vars = ht_create(&abd_alloc);
@@ -77,7 +80,7 @@ void cn_abd_pop_frame(void) {
   cn_abd_frame *frame = current_frame;
 
   /* Record data point */
-  abd_data_point *dp = cn_bump_malloc(sizeof(abd_data_point));
+  abd_data_point *dp = malloc(sizeof(abd_data_point));
   dp->function_name = frame->function_name;
   dp->pre_missing = frame->pre_missing;
   dp->pre_vars = frame->pre_vars;
@@ -182,7 +185,7 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
   if (ht_get(current_frame->missing, &key) != NULL)
     return; /* Already recorded */
 
-  int64_t *size_val = cn_bump_malloc(sizeof(int64_t));
+  int64_t *size_val = malloc(sizeof(int64_t));
   *size_val = (int64_t)size;
   ht_set(current_frame->missing, &key, size_val);
 
@@ -195,7 +198,7 @@ void cn_abd_record_var(
   if (!abd_enabled || current_frame == NULL)
     return;
 
-  cn_abd_var_entry *entry = cn_bump_malloc(sizeof(cn_abd_var_entry));
+  cn_abd_var_entry *entry = malloc(sizeof(cn_abd_var_entry));
   entry->name = name;
   entry->value = value;
   entry->size = size;

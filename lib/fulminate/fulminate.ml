@@ -542,6 +542,7 @@ let main
       ~experimental_ownership_stack_mode
       ~experimental_curly_braces
       ~with_testing
+      ~bi_abductive
       ~skip_and_only
       ?max_bump_blocks
       ?bump_block_size
@@ -575,6 +576,7 @@ let main
   Records.populate_record_map filtered_instrumentation prog5;
   let executable_spec =
     generate_c_specs
+      ~bi_abductive
       without_ownership_checking
       without_loop_invariants
       with_loop_leak_checks
@@ -754,6 +756,7 @@ let main
         generate_global_assignments
           ~exec_c_locs_mode
           ~experimental_ownership_stack_mode
+          ~bi_abductive
           ?max_bump_blocks
           ?bump_block_size
           cabs_tunit
@@ -765,6 +768,8 @@ let main
   (* Save things *)
   let oc = Stdlib.open_out out_filename in
   output_to_oc oc [ "#define __CN_INSTRUMENT\n"; "#include <cn-executable/utils.h>\n" ];
+  if bi_abductive then
+    output_to_oc oc [ "#include <cn-executable/bi_abduction.h>\n" ];
   output_to_oc oc cn_header_decls_list;
   output_to_oc
     oc
