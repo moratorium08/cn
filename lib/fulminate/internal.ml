@@ -782,7 +782,7 @@ let generate_global_assignments
            \t\textern int fclose(void *);\n\
            \t\tvoid *cn_abd_summary_file = fopen(\"cn_abd_summary.json\", \"w\");\n\
            \t\tcn_abd_dump_summary(cn_abd_summary_file);\n\
-           \t\tfclose(cn_abd_summary_file);\n\
+           \t\tif (cn_abd_summary_file) fclose(cn_abd_summary_file);\n\
            \t\tcn_abd_destroy();\n\
            \t}\n" ]
       else

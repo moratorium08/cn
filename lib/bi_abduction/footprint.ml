@@ -14,7 +14,7 @@ let owned_footprint ~(ct : Sctypes.t) ~(base_addr : int64) : Int64Set.t =
     if offset >= size then acc
     else
       let addr = Int64.add base_addr (Int64.of_int offset) in
-      add_words (Int64Set.add addr acc) (offset + 8)
+      add_words (Int64Set.add addr acc) (offset + 1)
   in
   add_words Int64Set.empty 0
 

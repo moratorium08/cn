@@ -123,24 +123,25 @@ void cn_abd_pop_frame(void) {
   current_frame = parent;
 }
 
+/* Signal handler state for safe memory reads (file scope) */
+static sigjmp_buf jmp_env;
+static volatile sig_atomic_t in_safe_read = 0;
+
+static void safe_read_handler(int sig) {
+  (void)sig;
+  if (in_safe_read)
+    siglongjmp(jmp_env, 1);
+}
+
 /* Dump heap neighborhood around an address to heap_output (JSONL) */
 static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
   if (heap_output == NULL)
     return;
 
-  /* Use sigsetjmp/siglongjmp for safe memory reads */
-  static sigjmp_buf jmp_env;
-  static volatile sig_atomic_t in_safe_read = 0;
-
-  void safe_read_handler(int sig) {
-    (void)sig;
-    if (in_safe_read)
-      siglongjmp(jmp_env, 1);
-  }
-
   /* Radius: 64 bytes in each direction, 8-byte aligned */
   const size_t radius = 64;
-  uintptr_t base = (addr & ~(uintptr_t)7) - radius;
+  uintptr_t aligned = addr & ~(uintptr_t)7;
+  uintptr_t base = (aligned >= radius) ? aligned - radius : 0;
   uintptr_t end = (addr & ~(uintptr_t)7) + radius;
 
   struct sigaction sa_new, sa_old_segv, sa_old_bus;
@@ -185,9 +186,11 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
   if (ht_get(current_frame->missing, &key) != NULL)
     return; /* Already recorded */
 
+  int64_t *heap_key = malloc(sizeof(int64_t));
+  *heap_key = (int64_t)addr;
   int64_t *size_val = malloc(sizeof(int64_t));
   *size_val = (int64_t)size;
-  ht_set(current_frame->missing, &key, size_val);
+  ht_set(current_frame->missing, heap_key, size_val);
 
   /* Dump heap neighborhood immediately */
   dump_heap_neighborhood(current_frame->function_name, addr);
@@ -204,8 +207,9 @@ void cn_abd_record_var(
   entry->size = size;
   entry->type_name = type_name;
 
-  int64_t idx = current_frame->var_count;
-  ht_set(current_frame->vars, &idx, entry);
+  int64_t *heap_idx = malloc(sizeof(int64_t));
+  *heap_idx = current_frame->var_count;
+  ht_set(current_frame->vars, heap_idx, entry);
   current_frame->var_count++;
 }
 
