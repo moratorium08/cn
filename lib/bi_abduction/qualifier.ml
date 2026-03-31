@@ -51,6 +51,9 @@ let pp_chain (chain : chain) : Pp.document =
 (** Pretty-print a single qualifier. *)
 let pp (q : t) : Pp.document = Request.pp q
 
+(** Equality check for qualifiers. *)
+let equal (a : t) (b : t) : bool = Request.equal a b
+
 (** Free variables in a qualifier. *)
 let free_vars (q : t) : Sym.Set.t = Request.free_vars q
 
