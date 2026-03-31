@@ -1,19 +1,62 @@
 #ifndef CN_BI_ABDUCTION_H
 #define CN_BI_ABDUCTION_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-
 #include "hash_table.h"
 #include "fulminate_alloc.h"
+
+#ifdef __CN_INSTRUMENT
+/* In instrumented code, system headers conflict with cerberus types.
+   Use cerberus types directly and void* for FILE*. */
+#include "cerb_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Variable valuation entry */
+typedef struct cn_abd_var_entry {
+  const char *name;
+  __cerbty_uintptr_t value;
+  __cerbty_size_t size;
+  const char *type_name;
+} cn_abd_var_entry;
+
+typedef struct cn_abd_frame {
+  const char *function_name;
+  hash_table *missing;
+  hash_table *vars;
+  int var_count;
+  hash_table *pre_missing;
+  hash_table *pre_vars;
+  int pre_var_count;
+  struct cn_abd_frame *prev;
+} cn_abd_frame;
+
+void cn_abd_init(void *heap_out);
+void cn_abd_destroy(void);
+_Bool cn_abd_is_enabled(void);
+void cn_abd_push_frame(const char *func_name);
+void cn_abd_pop_frame(void);
+void cn_abd_record_missing(__cerbty_uintptr_t addr, __cerbty_size_t size);
+void cn_abd_record_var(
+    const char *name, __cerbty_uintptr_t value, __cerbty_size_t size, const char *type_name);
+void cn_abd_mark_post(void);
+void cn_abd_dump_summary(void *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#else /* !__CN_INSTRUMENT: normal compilation of runtime */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct cn_abd_var_entry {
   const char *name;
   uintptr_t value;
@@ -21,7 +64,6 @@ typedef struct cn_abd_var_entry {
   const char *type_name;
 } cn_abd_var_entry;
 
-/* Per-frame state, pushed/popped at function boundaries */
 typedef struct cn_abd_frame {
   const char *function_name;
   hash_table *missing;        /* M: address (int64_t) -> size (int64_t*) */
@@ -34,37 +76,21 @@ typedef struct cn_abd_frame {
   struct cn_abd_frame *prev;  /* caller's frame */
 } cn_abd_frame;
 
-/* Initialise bi-abductive mode. heap_out receives incremental heap dumps (JSONL).
-   Pass NULL to skip heap dumps. */
 void cn_abd_init(FILE *heap_out);
-
-/* Clean up bi-abductive state */
 void cn_abd_destroy(void);
-
-/* Check if bi-abductive mode is enabled */
 bool cn_abd_is_enabled(void);
-
-/* Push a new frame at function entry */
 void cn_abd_push_frame(const char *func_name);
-
-/* Pop frame at function return: records data point, merges M into parent */
 void cn_abd_pop_frame(void);
-
-/* Record a missing ownership address in the current frame's M */
 void cn_abd_record_missing(uintptr_t addr, size_t size);
-
-/* Record a variable valuation in the current frame's V */
 void cn_abd_record_var(
     const char *name, uintptr_t value, size_t size, const char *type_name);
-
-/* Snapshot pre-state and start collecting post-state */
 void cn_abd_mark_post(void);
-
-/* Dump all collected data points as JSON to out */
 void cn_abd_dump_summary(FILE *out);
 
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* __CN_INSTRUMENT */
 
 #endif /* CN_BI_ABDUCTION_H */

@@ -742,7 +742,8 @@ let generate_global_assignments
       if bi_abductive then
         [ "\t/* Bi-abductive mode: initialise */\n\
            \t{\n\
-           \t\tFILE *cn_abd_heap_file = fopen(\"cn_abd_heap.jsonl\", \"w\");\n\
+           \t\textern void *fopen(const char *, const char *);\n\
+           \t\tvoid *cn_abd_heap_file = fopen(\"cn_abd_heap.jsonl\", \"w\");\n\
            \t\tcn_abd_init(cn_abd_heap_file);\n\
            \t}\n" ]
       else
@@ -763,7 +764,9 @@ let generate_global_assignments
       if bi_abductive then
         [ "\t/* Bi-abductive mode: dump summary and clean up */\n\
            \t{\n\
-           \t\tFILE *cn_abd_summary_file = fopen(\"cn_abd_summary.json\", \"w\");\n\
+           \t\textern void *fopen(const char *, const char *);\n\
+           \t\textern int fclose(void *);\n\
+           \t\tvoid *cn_abd_summary_file = fopen(\"cn_abd_summary.json\", \"w\");\n\
            \t\tcn_abd_dump_summary(cn_abd_summary_file);\n\
            \t\tfclose(cn_abd_summary_file);\n\
            \t\tcn_abd_destroy();\n\
