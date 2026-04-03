@@ -70,12 +70,14 @@ let compute_batch
   StdList.map (fun q -> (q, compute q dp)) qualifiers
 
 (** Compute predicate footprint using memory graph reachability.
-    For a predicate rooted at a pointer, the footprint is all missing
-    addresses reachable from that pointer in the memory graph. *)
+    For a predicate rooted at a pointer, the footprint is all bytes within
+    structs reachable from that pointer along pointer chains in the heap.
+    This covers the full ownership footprint of a recursive predicate. *)
 let predicate_footprint_from_graph
       (pointer : IndexTerms.t)
       (dp : Data_point.data_point)
       (graph : Memory_graph.t)
+      ~(struct_layouts : (Id.t * int * int) list Sym.Map.t)
   : Int64Set.t option
   =
   let var_env =
@@ -85,9 +87,11 @@ let predicate_footprint_from_graph
   in
   match eval_pointer_term pointer var_env with
   | Some addr ->
-    let reachable = Memory_graph.reachable_from graph addr in
+    let all_bytes =
+      Memory_graph.reachable_struct_bytes graph addr ~struct_layouts
+    in
     let missing = Memory_graph.missing graph in
-    let covered = Int64Set.inter reachable missing in
+    let covered = Int64Set.inter all_bytes missing in
     if Int64Set.is_empty covered then None
     else Some covered
   | None -> None
@@ -97,12 +101,13 @@ let compute_with_graph
       (qualifier : Qualifier.t)
       (dp : Data_point.data_point)
       (graph : Memory_graph.t)
+      ~(struct_layouts : (Id.t * int * int) list Sym.Map.t)
   : Int64Set.t option
   =
   match qualifier with
   | Request.P { name = Owned _; _ } ->
     compute qualifier dp
   | Request.P { name = PName _; pointer; iargs = _ } ->
-    predicate_footprint_from_graph pointer dp graph
+    predicate_footprint_from_graph pointer dp graph ~struct_layouts
   | Request.Q _ ->
     None

@@ -35,3 +35,10 @@ val anchors : t -> Int64Set.t
 
 (** Set of missing addresses. *)
 val missing : t -> Int64Set.t
+
+(** All byte addresses within structs reachable from a start address.
+    Expands struct bases along pointer chains to include full struct byte ranges. *)
+val reachable_struct_bytes
+  :  t -> int64 ->
+  struct_layouts:(Id.t * int * int) list Sym.Map.t ->
+  Int64Set.t
