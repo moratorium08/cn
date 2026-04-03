@@ -57,40 +57,40 @@ let build_struct_layouts
   =
   Sym.Map.map
     (fun fields ->
-       StdList.map
-         (fun (field_id, field_ct) ->
-            let size = Memory.size_of_ctype field_ct in
-            (* Offset computation: we'd need to walk fields in order
-               with alignment. For simplicity, use Cerberus's offsetof.
-               As a fallback, use sequential packing. *)
-            ignore size;
-            (field_id, 0, size))
-         fields)
+       let _, rev_layout =
+         StdList.fold_left
+           (fun (running_offset, acc) (field_id, field_ct) ->
+              let size = Memory.size_of_ctype field_ct in
+              let align = Memory.align_of_ctype field_ct in
+              let aligned_offset =
+                if align > 0 then
+                  let rem = running_offset mod align in
+                  if rem = 0 then running_offset
+                  else running_offset + (align - rem)
+                else
+                  running_offset
+              in
+              (aligned_offset + size, (field_id, aligned_offset, size) :: acc))
+           (0, []) fields
+       in
+       StdList.rev rev_layout)
     struct_defs
 
 (** Compute the must-cover set from data points for a function.
-    The must-cover set is the intersection of missing addresses across
-    all data points (addresses that are always missing). *)
+    Uses union of missing addresses across all data points so that
+    addresses seen in any execution are considered. *)
 let must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
-  match dps with
-  | [] -> Int64Set.empty
-  | first :: rest ->
-    let first_missing = Data_point.missing_addr_set first.Data_point.pre_missing in
-    StdList.fold_left
-      (fun acc (dp : Data_point.data_point) ->
-         Int64Set.inter acc (Data_point.missing_addr_set dp.pre_missing))
-      first_missing rest
+  StdList.fold_left
+    (fun acc (dp : Data_point.data_point) ->
+       Int64Set.union acc (Data_point.missing_addr_set dp.Data_point.pre_missing))
+    Int64Set.empty dps
 
 (** Compute the must-cover set for post-conditions. *)
 let post_must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
-  match dps with
-  | [] -> Int64Set.empty
-  | first :: rest ->
-    let first_missing = Data_point.missing_addr_set first.Data_point.post_missing in
-    StdList.fold_left
-      (fun acc (dp : Data_point.data_point) ->
-         Int64Set.inter acc (Data_point.missing_addr_set dp.post_missing))
-      first_missing rest
+  StdList.fold_left
+    (fun acc (dp : Data_point.data_point) ->
+       Int64Set.union acc (Data_point.missing_addr_set dp.Data_point.post_missing))
+    Int64Set.empty dps
 
 (** Run the inference pipeline for one function. *)
 let infer_function
@@ -123,9 +123,15 @@ let infer_function
          (sym, bt))
       representative_dp.pre_vars
   in
+  (* Build variable name → address mapping for predicate connectivity check *)
+  let var_addrs =
+    StdList.map
+      (fun (v : Data_point.var_binding) -> (v.name, v.value))
+      representative_dp.Data_point.pre_vars
+  in
   (* Enumerate candidate qualifiers *)
   let candidates = Enumerator.enumerate
-    ~config ~args ~pred_defs ~struct_defs ~graph ~loc
+    ~config ~args ~pred_defs ~struct_defs ~graph ~var_addrs ~loc
   in
   (* Compute footprints for pre-condition candidates *)
   let pre_must = must_cover_set dps in

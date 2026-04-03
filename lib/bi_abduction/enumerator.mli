@@ -28,5 +28,6 @@ val enumerate
   pred_defs:Definition.Predicate.t Sym.Map.t ->
   struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
   graph:Memory_graph.t ->
+  var_addrs:(string * int64) list ->
   loc:Locations.t ->
   Qualifier.t list

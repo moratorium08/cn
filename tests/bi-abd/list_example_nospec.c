@@ -31,7 +31,6 @@ int list_length(struct node *p)
   int n = 0;
   struct node *cur = p;
   while (cur != (void *)0)
-  /*@ inv true; @*/
   {
     n = n + 1;
     cur = cur->next;
