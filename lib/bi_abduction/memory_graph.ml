@@ -43,11 +43,11 @@ let add_edge src dst edge g =
 
 (** Build a memory graph from a data point and heap data.
 
-    - Anchors: addresses that appear in variable valuations (function args).
-    - Missing: addresses in the missing set.
-    - Edges: For each anchor/reachable address, if the 8-byte value at that address
-      looks like a pointer (appears as another node or is close to one), add a Deref edge.
-      For struct fields, add Offset edges between the base and field addresses.
+    Uses BFS expansion starting from anchor addresses (function arguments).
+    For each address, overlays every struct layout to find fields, then
+    follows pointer-sized fields via heap_lookup to discover new nodes.
+    This allows the graph to trace through linked structures (lists, trees)
+    even when intermediate nodes are not in the missing set.
 
     [struct_layouts] maps struct tag symbols to lists of (field_id, field_offset, field_size). *)
 let build
@@ -60,7 +60,6 @@ let build
       (Data_point.missing_addr_set dp.pre_missing)
       (Data_point.missing_addr_set dp.post_missing)
   in
-  (* Collect all "interesting" addresses: anchors + missing *)
   let anchor_addrs =
     StdList.fold_left
       (fun acc (v : Data_point.var_binding) ->
@@ -68,52 +67,64 @@ let build
       Int64Set.empty
       (dp.pre_vars @ dp.post_vars)
   in
-  let all_addrs = Int64Set.union anchor_addrs missing_set in
-  (* Initialize graph with known nodes *)
   let g = ref empty in
+  (* Add all missing addresses as nodes *)
   Int64Set.iter
     (fun addr ->
-       let info =
+       g := add_node addr
          { is_anchor = Int64Set.mem addr anchor_addrs;
-           is_missing = Int64Set.mem addr missing_set
-         }
-       in
-       g := add_node addr info !g)
-    all_addrs;
-  (* Add struct offset edges: for each anchor, try each struct layout *)
-  Int64Set.iter
-    (fun base_addr ->
-       Sym.Map.iter
-         (fun _tag fields ->
-            StdList.iter
-              (fun (_field_id, offset, _size) ->
-                 let field_addr = Int64.add base_addr (Int64.of_int offset) in
-                 if Int64Set.mem field_addr all_addrs || offset = 0 then begin
-                   (* Add the field node if not present *)
-                   if not (Int64Map.mem field_addr !g.info) then
-                     g := add_node field_addr
-                       { is_anchor = false;
-                         is_missing = Int64Set.mem field_addr missing_set
-                       } !g;
-                   if offset > 0 then
-                     g := add_edge base_addr field_addr (Offset offset) !g
-                 end)
-              fields)
-         struct_layouts)
-    anchor_addrs;
-  (* Add dereference edges: for each address in the graph, look up its value
-     in the heap dump. If the value matches another address in the graph, add Deref. *)
-  let current_addrs =
-    Int64Map.fold (fun k _ acc -> Int64Set.add k acc) !g.info Int64Set.empty
-  in
+           is_missing = true } !g)
+    missing_set;
+  (* BFS from anchors, following struct field pointers *)
+  let visited = ref Int64Set.empty in
+  let worklist = Queue.create () in
+  let max_nodes = 10000 in
+  (* Seed with anchor addresses *)
   Int64Set.iter
     (fun addr ->
-       (* Read the 8-byte value at this address *)
-       match heap_lookup addr with
-       | Some pointed_to when Int64Set.mem pointed_to current_addrs ->
-         g := add_edge addr pointed_to Deref !g
-       | _ -> ())
-    current_addrs;
+       g := add_node addr
+         { is_anchor = true;
+           is_missing = Int64Set.mem addr missing_set } !g;
+       Queue.add addr worklist)
+    anchor_addrs;
+  while not (Queue.is_empty worklist)
+        && Int64Map.cardinal !g.info < max_nodes do
+    let base = Queue.pop worklist in
+    if not (Int64Set.mem base !visited) then begin
+      visited := Int64Set.add base !visited;
+      (* Try overlaying each struct layout at this base address *)
+      Sym.Map.iter
+        (fun _tag fields ->
+           StdList.iter
+             (fun (_field_id, offset, size) ->
+                let field_addr = Int64.add base (Int64.of_int offset) in
+                (* Add field node if not already present *)
+                if not (Int64Map.mem field_addr !g.info) then
+                  g := add_node field_addr
+                    { is_anchor = false;
+                      is_missing = Int64Set.mem field_addr missing_set } !g;
+                (* Add Offset edge from base to field (skip self-edges) *)
+                if offset > 0 then
+                  g := add_edge base field_addr (Offset offset) !g;
+                (* If field is pointer-sized (8 bytes), try dereference *)
+                if size = 8 then begin
+                  match heap_lookup field_addr with
+                  | Some target when Int64.compare target 0L <> 0 ->
+                    (* Non-NULL pointer target: add node and Deref edge *)
+                    if not (Int64Map.mem target !g.info) then
+                      g := add_node target
+                        { is_anchor = false;
+                          is_missing = Int64Set.mem target missing_set } !g;
+                    g := add_edge field_addr target Deref !g;
+                    (* Enqueue target for further exploration *)
+                    if not (Int64Set.mem target !visited) then
+                      Queue.add target worklist
+                  | _ -> ()
+                end)
+             fields)
+        struct_layouts
+    end
+  done;
   !g
 
 (** All addresses reachable from [start] via any edges. *)
@@ -156,4 +167,68 @@ let missing (g : t) : Int64Set.t =
     (fun addr info acc ->
        if info.is_missing then Int64Set.add addr acc else acc)
     g.info
+    Int64Set.empty
+
+(** Compute the total size of each struct layout (max of offset + size across fields). *)
+let struct_total_sizes
+      (struct_layouts : (Id.t * int * int) list Sym.Map.t)
+  : int list
+  =
+  Sym.Map.fold
+    (fun _tag fields acc ->
+       let total =
+         StdList.fold_left
+           (fun mx (_fid, off, sz) -> max mx (off + sz))
+           0 fields
+       in
+       total :: acc)
+    struct_layouts []
+
+(** All byte addresses within structs reachable from [start].
+    For each struct base address reachable via pointer chains,
+    expands to include all bytes in [base, base + struct_size).
+    This gives the full ownership footprint of a recursive predicate. *)
+let reachable_struct_bytes
+      (g : t)
+      (start : int64)
+      ~(struct_layouts : (Id.t * int * int) list Sym.Map.t)
+  : Int64Set.t
+  =
+  let sizes = struct_total_sizes struct_layouts in
+  let reachable = reachable_from g start in
+  (* Identify struct base addresses: those with outgoing Offset or Deref edges,
+     or that are targets of Deref edges. We approximate by checking if any
+     struct field offset from the address also appears in the graph. *)
+  Int64Set.fold
+    (fun addr acc ->
+       (* Check if this address looks like a struct base by checking
+          whether it has outgoing edges (offset or was explored) *)
+       let has_outgoing =
+         match Int64Map.find_opt addr g.adj with
+         | Some (_ :: _) -> true
+         | _ -> false
+       in
+       (* Also consider it a struct base if it's a Deref target or anchor *)
+       let is_base =
+         has_outgoing ||
+         (match Int64Map.find_opt addr g.info with
+          | Some info -> info.is_anchor
+          | None -> false)
+       in
+       if is_base then
+         (* Expand: add all bytes [addr, addr + struct_size) for each struct *)
+         StdList.fold_left
+           (fun acc2 total_size ->
+              let rec add_bytes s offset =
+                if offset >= total_size then s
+                else
+                  add_bytes
+                    (Int64Set.add (Int64.add addr (Int64.of_int offset)) s)
+                    (offset + 1)
+              in
+              add_bytes acc2 0)
+           acc sizes
+       else
+         Int64Set.add addr acc)
+    reachable
     Int64Set.empty

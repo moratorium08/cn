@@ -15,10 +15,12 @@ val predicate_footprint_from_graph
   :  IndexTerms.t
   -> Data_point.data_point
   -> Memory_graph.t
+  -> struct_layouts:(Id.t * int * int) list Sym.Map.t
   -> Int64Set.t option
 
 val compute_with_graph
   :  Qualifier.t
   -> Data_point.data_point
   -> Memory_graph.t
+  -> struct_layouts:(Id.t * int * int) list Sym.Map.t
   -> Int64Set.t option

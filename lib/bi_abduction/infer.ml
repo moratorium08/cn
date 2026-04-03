@@ -104,8 +104,23 @@ let infer_function
   =
   let loc = Locations.other __FUNCTION__ in
   let struct_layouts = build_struct_layouts struct_defs in
-  (* Use the first data point to build the memory graph and extract args *)
-  let representative_dp = StdList.hd dps in
+  (* Pick the data point with the most missing addresses as representative.
+     For recursive functions, base cases (e.g., NULL) have empty missing sets,
+     so we need the call with the richest data. *)
+  let representative_dp =
+    StdList.fold_left
+      (fun best (dp : Data_point.data_point) ->
+         let n =
+           StdList.length dp.pre_missing + StdList.length dp.post_missing
+         in
+         let best_n =
+           StdList.length best.Data_point.pre_missing
+           + StdList.length best.Data_point.post_missing
+         in
+         if n > best_n then dp else best)
+      (StdList.hd dps)
+      dps
+  in
   let graph = Memory_graph.build
     ~dp:representative_dp
     ~heap_lookup
@@ -138,7 +153,7 @@ let infer_function
   let pre_candidates =
     StdList.filter_map
       (fun q ->
-         match Footprint.compute_with_graph q representative_dp graph with
+         match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp pre_must)) ->
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
@@ -150,7 +165,7 @@ let infer_function
   let post_candidates =
     StdList.filter_map
       (fun q ->
-         match Footprint.compute_with_graph q representative_dp graph with
+         match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp post_must)) ->
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
