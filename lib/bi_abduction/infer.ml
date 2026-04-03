@@ -2,7 +2,13 @@
 
     Pipeline: parse summary + heap → group by function → for each function:
     build memory graph → enumerate qualifiers → compute footprints →
-    run cover algorithm → format as CN annotation suggestions. *)
+    run cover algorithm → format as CN annotation suggestions.
+
+    Debug output via [Pp.debug]:
+    - Level 2: pipeline stages
+    - Level 3: data point details, representative selection
+    - Level 4: graph stats, enumeration results
+    - Level 5: per-qualifier footprints, cover steps *)
 
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
@@ -102,8 +108,13 @@ let infer_function
       ~(dps : Data_point.data_point list)
   : inferred_spec
   =
+  let open Pp in
+  Pp.debug 2 (lazy (headline ("bi-abd: inferring specs for " ^ func_name)));
+  Pp.debug 3 (lazy (item "data points" (Pp.int (StdList.length dps))));
   let loc = Locations.other __FUNCTION__ in
   let struct_layouts = build_struct_layouts struct_defs in
+  Pp.debug 4 (lazy (item "struct layouts"
+    (Pp.int (Sym.Map.cardinal struct_layouts) ^^^ !^"struct types")));
   (* Pick the data point with the most missing addresses as representative.
      For recursive functions, base cases (e.g., NULL) have empty missing sets,
      so we need the call with the richest data. *)
@@ -121,11 +132,34 @@ let infer_function
       (StdList.hd dps)
       dps
   in
+  Pp.debug 3 (lazy begin
+    let pre_n = StdList.length representative_dp.Data_point.pre_missing in
+    let post_n = StdList.length representative_dp.Data_point.post_missing in
+    item "representative data point"
+      (!^"pre_missing:" ^^^ Pp.int pre_n ^^^
+       !^"post_missing:" ^^^ Pp.int post_n)
+  end);
+  Pp.debug 3 (lazy begin
+    item "variables"
+      (separate_map (comma ^^ space)
+         (fun (v : Data_point.var_binding) ->
+            !^(v.name) ^^^ !^"=" ^^^ !^(Printf.sprintf "0x%Lx" v.value)
+            ^^^ !^(Printf.sprintf "(%d bytes)" v.size))
+         representative_dp.Data_point.pre_vars)
+  end);
   let graph = Memory_graph.build
     ~dp:representative_dp
     ~heap_lookup
     ~struct_layouts
   in
+  let graph_nodes = Memory_graph.Int64Map.cardinal
+    (Memory_graph.info graph) in
+  let graph_anchors = Int64Set.cardinal (Memory_graph.anchors graph) in
+  let graph_missing = Int64Set.cardinal (Memory_graph.missing graph) in
+  Pp.debug 4 (lazy
+    (item "memory graph"
+       (!^(Printf.sprintf "%d nodes, %d anchors, %d missing"
+              graph_nodes graph_anchors graph_missing))));
   (* Extract function arguments as (Sym.t * BaseTypes.t) pairs *)
   let args =
     StdList.map
@@ -148,30 +182,69 @@ let infer_function
   let candidates = Enumerator.enumerate
     ~config ~args ~pred_defs ~struct_defs ~graph ~var_addrs ~loc
   in
+  Pp.debug 4 (lazy
+    (item "candidates" (Pp.int (StdList.length candidates) ^^^ !^"qualifiers")));
+  StdList.iter (fun q ->
+    Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
+    candidates;
   (* Compute footprints for pre-condition candidates *)
   let pre_must = must_cover_set dps in
+  Pp.debug 3 (lazy
+    (item "pre must-cover" (Pp.int (Int64Set.cardinal pre_must) ^^^ !^"bytes")));
   let pre_candidates =
     StdList.filter_map
       (fun q ->
          match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp pre_must)) ->
+           let covers = Int64Set.cardinal (Int64Set.inter fp pre_must) in
+           Pp.debug 5 (lazy
+             (item "  pre footprint"
+                (Qualifier.pp q ^^^ !^"->" ^^^
+                 Pp.int (Int64Set.cardinal fp) ^^^ !^"bytes," ^^^
+                 Pp.int covers ^^^ !^"covering must")));
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
       candidates
   in
+  Pp.debug 4 (lazy
+    (item "pre candidates with footprints" (Pp.int (StdList.length pre_candidates))));
   let pre_result = Cover.cover ~must_cover:pre_must ~candidates:pre_candidates in
+  Pp.debug 3 (lazy begin
+    let n_sel = StdList.length pre_result.selected in
+    let n_uncov = Int64Set.cardinal pre_result.uncovered in
+    item "pre cover result"
+      (Pp.int n_sel ^^^ !^"selected," ^^^
+       Pp.int n_uncov ^^^ !^"uncovered")
+  end);
   (* Compute footprints for post-condition candidates *)
   let post_must = post_must_cover_set dps in
+  Pp.debug 3 (lazy
+    (item "post must-cover" (Pp.int (Int64Set.cardinal post_must) ^^^ !^"bytes")));
   let post_candidates =
     StdList.filter_map
       (fun q ->
          match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp post_must)) ->
+           let covers = Int64Set.cardinal (Int64Set.inter fp post_must) in
+           Pp.debug 5 (lazy
+             (item "  post footprint"
+                (Qualifier.pp q ^^^ !^"->" ^^^
+                 Pp.int (Int64Set.cardinal fp) ^^^ !^"bytes," ^^^
+                 Pp.int covers ^^^ !^"covering must")));
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
       candidates
   in
+  Pp.debug 4 (lazy
+    (item "post candidates with footprints" (Pp.int (StdList.length post_candidates))));
   let post_result = Cover.cover ~must_cover:post_must ~candidates:post_candidates in
+  Pp.debug 3 (lazy begin
+    let n_sel = StdList.length post_result.selected in
+    let n_uncov = Int64Set.cardinal post_result.uncovered in
+    item "post cover result"
+      (Pp.int n_sel ^^^ !^"selected," ^^^
+       Pp.int n_uncov ^^^ !^"uncovered")
+  end);
   (* Analyse which variables' memory ranges are missing *)
   let pre_analysis =
     analyse_missing_vars representative_dp.Data_point.pre_vars
@@ -199,7 +272,20 @@ let infer
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
   : inferred_spec list
   =
+  let open Pp in
+  Pp.debug 2 (lazy (headline "bi-abd: starting inference"));
+  Pp.debug 2 (lazy
+    (item "input"
+       (Pp.int (StdList.length execution_data.data_points) ^^^ !^"data points," ^^^
+        Pp.int (Sym.Map.cardinal pred_defs) ^^^ !^"predicates," ^^^
+        Pp.int (Sym.Map.cardinal struct_defs) ^^^ !^"struct types")));
   let grouped = Data_point.group_by_function execution_data.data_points in
+  Pp.debug 2 (lazy
+    (item "functions"
+       (separate_map (comma ^^ space)
+          (fun (name, dps) ->
+             !^name ^^^ !^(Printf.sprintf "(%d calls)" (StdList.length dps)))
+          grouped)));
   StdList.map
     (fun (func_name, dps) ->
        infer_function ~config ~pred_defs ~struct_defs
@@ -273,7 +359,12 @@ let infer_from_files
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
   : inferred_spec list
   =
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
   let execution_data = Data_point.parse_summary_json summary_file in
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
   let heap_dumps = Data_point.parse_heap_jsonl heap_file in
+  Pp.debug 3 (lazy
+    (Pp.item "heap dumps"
+       (Pp.string (Printf.sprintf "%d entries" (StdList.length heap_dumps)))));
   let heap_lookup = Data_point.heap_lookup heap_dumps in
   infer ~config ~execution_data ~heap_lookup ~pred_defs ~struct_defs

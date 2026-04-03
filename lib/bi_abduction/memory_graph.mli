@@ -16,6 +16,9 @@ type t
 
 val empty : t
 
+(** Access the per-node info map (for debug/stats). *)
+val info : t -> node_info Int64Map.t
+
 (** Build a memory graph from a data point and heap data.
     [struct_layouts] maps struct tags to (field_id, offset, size) triples. *)
 val build
