@@ -102,6 +102,7 @@ let predicate_qualifiers
       ~(args : (Sym.t * BaseTypes.t) list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(graph : Memory_graph.t)
+      ~(var_addrs : (string * int64) list)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
@@ -112,15 +113,23 @@ let predicate_qualifiers
        match IT.is_sym ptr_term with
        | None -> []
        | Some (sym, _bt) ->
+         (* Look up this pointer's concrete address *)
+         let sym_name = Sym.pp_string sym in
+         let sym_addr = StdList.assoc_opt sym_name var_addrs in
          Sym.Map.fold
            (fun pred_name pred_def acc ->
               if not pred_def.Definition.Predicate.recursive then acc
               else begin
-                let anchors = Memory_graph.anchors graph in
+                (* Check if THIS pointer connects to missing addresses *)
                 let connects =
-                  Int64Set.exists
-                    (fun addr -> Memory_graph.connects_to_missing graph addr)
-                    anchors
+                  match sym_addr with
+                  | Some addr -> Memory_graph.connects_to_missing graph addr
+                  | None ->
+                    (* Fallback: check all anchors *)
+                    let anchors = Memory_graph.anchors graph in
+                    Int64Set.exists
+                      (fun a -> Memory_graph.connects_to_missing graph a)
+                      anchors
                 in
                 if connects then begin
                   let q = Qualifier.predicate
@@ -131,7 +140,6 @@ let predicate_qualifiers
                          IT.sym_ (iarg_sym, bt_to_internal iarg_bt, loc))
                       pred_def.iargs)
                   in
-                  ignore sym;
                   q :: acc
                 end else
                   acc
@@ -146,12 +154,13 @@ let enumerate
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(graph : Memory_graph.t)
+      ~(var_addrs : (string * int64) list)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
   let owned_qs = owned_qualifiers ~args ~struct_defs ~loc in
   let pred_qs =
-    predicate_qualifiers ~config ~args ~pred_defs ~graph ~loc
+    predicate_qualifiers ~config ~args ~pred_defs ~graph ~var_addrs ~loc
   in
   let all = owned_qs @ pred_qs in
   if StdList.length all > config.max_qualifiers then
