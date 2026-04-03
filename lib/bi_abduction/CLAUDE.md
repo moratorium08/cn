@@ -69,12 +69,12 @@ The inference modules use `Pp.debug` at these levels:
 
 ## Known limitations / TODOs
 
-- **Pre-condition inference**: `requires true` generates no ownership checks, so `pre_missing` is always empty. Currently only post-conditions get useful suggestions. Needs either: (a) a "speculative pre-check" mode, or (b) assuming pre = post for simple cases.
-- **`traversal_fields` stub**: `enumerator.ml` has a TODO to walk `LogicalArgumentTypes` and extract which struct fields a predicate traverses. Currently predicates are matched purely via memory graph connectivity, which works but is less precise.
-- **Single representative data point**: The graph is built from one data point. Using multiple would improve coverage (e.g. different list lengths exercise different chain depths).
-- **No quantified resources (`each`)**: `Request.Q` cases return `None` everywhere. Iterated separating conjunctions (arrays) are not yet supported.
-- **Predicate iargs**: The enumerator passes the predicate's own `iargs` symbols as index arguments, which may not be correct for all predicates. Works for predicates with no index args or simple ones.
-- **No negative examples**: The cover algorithm only uses positive data (missing addresses). Using addresses that are NOT missing (negative examples) could eliminate spurious candidates.
+See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
+
+- **Only postconditions are inferred** — `pre_missing` is always empty because body accesses land in `post_missing`
+- **Multiple executions break inference** — `must_cover_set` unions addresses from different calls; `exact_cover` only tracks complete covers
+- **No partial spec awareness** — suggested qualifiers may overlap with existing takes
+- **No iterated resources, free/malloc, loop invariants, qualifier chains, return value**
 
 ## Testing
 
