@@ -1,9 +1,8 @@
-(** CLI subcommand for bi-abductive inference.
+(** CLI subcommand for push-button bi-abductive inference.
 
-    Reads the summary JSON and heap JSONL files produced by a bi-abductive
-    execution run, parses the original C source for struct/predicate
-    definitions, runs the inference pipeline, and prints suggested
-    CN specifications. *)
+    Single command that instruments a C file, compiles and runs it
+    in bi-abductive mode, then analyses the output to suggest CN
+    specifications. *)
 
 module CF = Cerb_frontend
 module C = CF.Ctype
@@ -11,8 +10,7 @@ module A = CF.AilSyntax
 open Cmdliner
 open Cn
 
-(** Extract struct definitions from the Ail sigma.
-    Returns a Sym.Map from struct tag to list of (field_id, field_sctypes). *)
+(** Extract struct definitions from the Ail sigma. *)
 let extract_struct_defs (sigm : _ A.sigma) : (Id.t * Sctypes.t) list Sym.Map.t =
   List.fold_left
     (fun acc (tag_sym, (_, _, tag_def)) ->
@@ -40,21 +38,61 @@ let extract_pred_defs (prog5 : unit Mucore.file)
     Sym.Map.empty
     prog5.resource_predicates
 
-let run_inference_with_defs ~summary_file ~heap_file ~struct_defs ~pred_defs =
-  let config = Bi_abduction.Enumerator.default_config in
-  let specs =
-    Bi_abduction.Infer.infer_from_files
-      ~config
-      ~summary_file
-      ~heap_file
-      ~pred_defs
-      ~struct_defs
+(** Compile and run the instrumented file as a subprocess.
+    Returns the exit code. *)
+let compile_and_run ~cc ~output_dir ~instrumented_file =
+  (* Find runtime include/lib paths *)
+  let includes, lib_path =
+    match Sys.getenv_opt "CN_RUNTIME_PREFIX" with
+    | Some p when Sys.file_exists (Filename.concat p "include") ->
+      ("-I" ^ Filename.concat p "include",
+       Filename.concat p "libcn_exec.a")
+    | _ ->
+      let opam_rt =
+        match Sys.getenv_opt "OPAM_SWITCH_PREFIX" with
+        | Some p -> p ^ "/lib/cn/runtime"
+        | None -> ""
+      in
+      if String.length opam_rt > 0 && Sys.file_exists opam_rt then
+        ("-I" ^ Filename.concat opam_rt "include",
+         Filename.concat opam_rt "libcn_exec.a")
+      else (
+        Printf.eprintf
+          "Could not find CN runtime. Set CN_RUNTIME_PREFIX or install CN.\n\
+           For development: CN_RUNTIME_PREFIX should contain include/ and libcn_exec.a\n";
+        exit 1)
   in
-  let doc = Bi_abduction.Infer.pp_suggestions specs in
-  Pp.print stdout doc;
-  Format.printf "@."
+  let obj_file =
+    Filename.concat output_dir
+      (Filename.remove_extension (Filename.basename instrumented_file) ^ ".o")
+  in
+  let exe_file =
+    Filename.concat output_dir
+      (Filename.remove_extension (Filename.basename instrumented_file) ^ ".out")
+  in
+  let cflags = Option.value ~default:"" (Sys.getenv_opt "CFLAGS") in
+  let cppflags = Option.value ~default:"" (Sys.getenv_opt "CPPFLAGS") in
+  let flags = String.concat " " [ "-g"; cflags; cppflags ] in
+  (* Compile *)
+  let compile_cmd =
+    Printf.sprintf "%s -c %s %s -o %s %s"
+      cc flags includes obj_file instrumented_file
+  in
+  if Sys.command compile_cmd <> 0 then (
+    Printf.eprintf "Failed to compile '%s'\n" instrumented_file;
+    exit 1);
+  (* Link *)
+  let link_cmd =
+    Printf.sprintf "%s %s %s -o %s %s %s -lm"
+      cc flags includes exe_file obj_file lib_path
+  in
+  if Sys.command link_cmd <> 0 then (
+    Printf.eprintf "Failed to link '%s'\n" instrumented_file;
+    exit 1);
+  (* Run as subprocess *)
+  Sys.command exe_file
 
-let generate_infer
+let generate_bi_abd
       filename
       cc
       macros
@@ -70,11 +108,10 @@ let generate_infer
       csv_times
       astprints
       dont_use_vip
+      fail_fast
       no_inherit_loc
       magic_comment_char_dollar
       allow_split_magic_comments
-      summary_file
-      heap_file
   =
   Cerb_debug.debug_level := debug_level;
   Pp.loc_pp := loc_pp;
@@ -82,17 +119,22 @@ let generate_infer
   Sym.print_nums := print_sym_nums;
   Pp.print_timestamps := not no_timestamps;
   IndexTerms.use_vip := not dont_use_vip;
+  Check.fail_fast := fail_fast;
   Diagnostics.diag_string := diag;
+  Sym.executable_spec_enabled := true;
   let handle_error (e : TypeErrors.t) =
     let report = TypeErrors.pp_message e.msg in
     Pp.error e.loc report.short (Option.to_list report.descr);
     match e.msg with TypeErrors.Unsupported _ -> exit 2 | _ -> exit 1
   in
   let filename = Common.there_can_only_be_one filename in
+  let basefile = Filename.basename filename in
+  let pp_file = Filename.temp_file "cn_" basefile in
+  let out_file = Fulminate.get_instrumented_filename basefile in
   Common.with_well_formedness_check
     ~filename
     ~cc
-    ~macros
+    ~macros:(("__CN_INSTRUMENT", None) :: macros)
     ~permissive
     ~incl_dirs
     ~incl_files
@@ -105,37 +147,78 @@ let generate_infer
     ~no_inherit_loc
     ~magic_comment_char_dollar
     ~allow_split_magic_comments
-    ~save_cpp:None
+    ~save_cpp:(Some pp_file)
     ~disable_linemarkers:false
-    ~skip_label_inlining:false
+    ~skip_label_inlining:true
     ~handle_error
-    ~f:(fun ~cabs_tunit:_ ~prog5 ~ail_prog ~statement_locs:_ ~paused:_ ->
+    ~f:(fun ~cabs_tunit ~prog5 ~ail_prog ~statement_locs:_ ~paused:_ ->
       let _startup_sym, sigm = ail_prog in
       let struct_defs = extract_struct_defs sigm in
       let pred_defs = extract_pred_defs prog5 in
-      run_inference_with_defs ~summary_file ~heap_file ~struct_defs ~pred_defs;
-      Ok ())
-
-module Flags = struct
-  let summary_file =
-    let doc = "Path to the bi-abductive summary file (cn_abd_summary.json)." in
-    Arg.(
-      value
-      & opt string "cn_abd_summary.json"
-      & info [ "summary" ] ~docv:"FILE" ~doc)
-
-  let heap_file =
-    let doc = "Path to the bi-abductive heap dump file (cn_abd_heap.jsonl)." in
-    Arg.(
-      value
-      & opt string "cn_abd_heap.jsonl"
-      & info [ "heap" ] ~docv:"FILE" ~doc)
-end
+      let output_dir =
+        Common.mk_dir_if_not_exist_maybe_tmp ~mktemp:true Instrument None
+      in
+      (* Step 1: Generate instrumented C *)
+      Cerb_colour.without_colour
+        (fun () ->
+           (try
+              Fulminate.main
+                ~without_ownership_checking:false
+                ~without_loop_invariants:false
+                ~with_loop_leak_checks:false
+                ~without_lemma_checks:false
+                ~exec_c_locs_mode:false
+                ~experimental_ownership_stack_mode:false
+                ~experimental_curly_braces:false
+                ~with_testing:false
+                ~bi_abductive:true
+                ~skip_and_only:([], [])
+                filename
+                cc
+                pp_file
+                out_file
+                output_dir
+                cabs_tunit
+                ail_prog
+                prog5
+            with
+            | e -> Common.handle_error_with_user_guidance ~label:"CN-Exec" e);
+           ())
+        ();
+      let instrumented_path = Filename.concat output_dir out_file in
+      Printf.printf "Instrumented: %s\n" instrumented_path;
+      (* Step 2: Compile and run *)
+      Printf.printf "Compiling and running...\n%!";
+      let exit_code = compile_and_run ~cc ~output_dir ~instrumented_file:instrumented_path in
+      Printf.printf "Execution finished (exit code %d)\n%!" exit_code;
+      (* Step 3: Run inference *)
+      let summary_file = "cn_abd_summary.json" in
+      let heap_file = "cn_abd_heap.jsonl" in
+      if not (Sys.file_exists summary_file) then (
+        Printf.eprintf "No summary file found at %s\n" summary_file;
+        Ok ())
+      else begin
+        Printf.printf "Running inference...\n%!";
+        let config = Bi_abduction.Enumerator.default_config in
+        let specs =
+          Bi_abduction.Infer.infer_from_files
+            ~config
+            ~summary_file
+            ~heap_file
+            ~pred_defs
+            ~struct_defs
+        in
+        Printf.printf "\n";
+        let doc = Bi_abduction.Infer.pp_suggestions specs in
+        Pp.print stdout doc;
+        Format.printf "@.";
+        Ok ()
+      end)
 
 let cmd =
   let open Term in
-  let infer_t =
-    const generate_infer
+  let bi_abd_t =
+    const generate_bi_abd
     $ Common.Flags.file
     $ Common.Flags.cc
     $ Common.Flags.macros
@@ -151,16 +234,15 @@ let cmd =
     $ Common.Flags.csv_times
     $ Common.Flags.astprints
     $ Verify.Flags.dont_use_vip
+    $ Verify.Flags.fail_fast
     $ Common.Flags.no_inherit_loc
     $ Common.Flags.magic_comment_char_dollar
     $ Common.Flags.allow_split_magic_comments
-    $ Flags.summary_file
-    $ Flags.heap_file
   in
   let doc =
-    "Analyse bi-abductive execution output and suggest CN specifications.\n\
-     Requires the original C source [FILE] for struct and predicate \
-     definitions, plus the summary JSON and heap JSONL files from --bi-abd."
+    "Push-button bi-abductive inference. Instruments [FILE] with \
+     bi-abductive execution support, compiles and runs it, then analyses \
+     the output to suggest CN specifications."
   in
-  let info = Cmd.info "infer" ~doc in
-  Cmd.v info infer_t
+  let info = Cmd.info "bi-abd" ~doc in
+  Cmd.v info bi_abd_t
