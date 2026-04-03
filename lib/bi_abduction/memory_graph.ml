@@ -25,6 +25,8 @@ let empty =
     info = Int64Map.empty
   }
 
+let info g = g.info
+
 let add_node addr node_info g =
   let info = Int64Map.add addr node_info g.info in
   let adj =
@@ -67,6 +69,10 @@ let build
       Int64Set.empty
       (dp.pre_vars @ dp.post_vars)
   in
+  Pp.debug 4 (lazy (Pp.item "graph: anchors"
+    (Pp.int (Int64Set.cardinal anchor_addrs))));
+  Pp.debug 4 (lazy (Pp.item "graph: missing bytes"
+    (Pp.int (Int64Set.cardinal missing_set))));
   let g = ref empty in
   (* Add all missing addresses as nodes *)
   Int64Set.iter
@@ -82,6 +88,8 @@ let build
   (* Seed with anchor addresses *)
   Int64Set.iter
     (fun addr ->
+       Pp.debug 5 (lazy (Pp.item "graph: anchor"
+         (Pp.string (Printf.sprintf "0x%Lx" addr))));
        g := add_node addr
          { is_anchor = true;
            is_missing = Int64Set.mem addr missing_set } !g;
@@ -111,6 +119,9 @@ let build
                   match heap_lookup field_addr with
                   | Some target when Int64.compare target 0L <> 0 ->
                     (* Non-NULL pointer target: add node and Deref edge *)
+                    Pp.debug 5 (lazy (Pp.string
+                      (Printf.sprintf "graph: deref 0x%Lx -> 0x%Lx"
+                         field_addr target)));
                     if not (Int64Map.mem target !g.info) then
                       g := add_node target
                         { is_anchor = false;
@@ -125,6 +136,10 @@ let build
         struct_layouts
     end
   done;
+  let total_nodes = Int64Map.cardinal !g.info in
+  let total_visited = Int64Set.cardinal !visited in
+  Pp.debug 4 (lazy (Pp.string
+    (Printf.sprintf "graph: BFS done, %d nodes, %d visited" total_nodes total_visited)));
   !g
 
 (** All addresses reachable from [start] via any edges. *)

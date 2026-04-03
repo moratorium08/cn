@@ -131,6 +131,9 @@ let predicate_qualifiers
                       (fun a -> Memory_graph.connects_to_missing graph a)
                       anchors
                 in
+                Pp.debug 5 (lazy (Pp.string
+                  (Printf.sprintf "enum: pred %s(%s) connects=%b"
+                     (Sym.pp_string pred_name) sym_name connects)));
                 if connects then begin
                   let q = Qualifier.predicate
                     ~name:pred_name
@@ -159,11 +162,16 @@ let enumerate
   : Qualifier.t list
   =
   let owned_qs = owned_qualifiers ~args ~struct_defs ~loc in
+  Pp.debug 4 (lazy (Pp.item "enum: owned qualifiers" (Pp.int (StdList.length owned_qs))));
   let pred_qs =
     predicate_qualifiers ~config ~args ~pred_defs ~graph ~var_addrs ~loc
   in
+  Pp.debug 4 (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
   let all = owned_qs @ pred_qs in
-  if StdList.length all > config.max_qualifiers then
+  if StdList.length all > config.max_qualifiers then begin
+    Pp.debug 3 (lazy (Pp.string
+      (Printf.sprintf "enum: truncating %d candidates to %d"
+         (StdList.length all) config.max_qualifiers)));
     StdList.filteri (fun i _ -> i < config.max_qualifiers) all
-  else
+  end else
     all
