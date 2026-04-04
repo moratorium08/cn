@@ -38,6 +38,27 @@ let extract_pred_defs (prog5 : unit Mucore.file)
     Sym.Map.empty
     prog5.resource_predicates
 
+(** Extract function parameter types from the Ail sigma.
+    Maps function name -> list of (parameter name, parameter type). *)
+let extract_function_args
+      (sigm : _ A.sigma)
+  : (string * (string * Sctypes.t) list) list
+  =
+  List.filter_map
+    (fun (fn_sym, (_, _, _, param_syms, _)) ->
+       match List.assoc_opt Sym.equal fn_sym sigm.A.declarations with
+       | Some (_, _, A.Decl_function (_, _, param_types, _, _, _)) ->
+         let params =
+           List.combine param_syms param_types
+           |> List.filter_map (fun (param_sym, (_, ctype, _)) ->
+             match Sctypes.of_ctype ctype with
+             | Some ct -> Some (Sym.pp_string param_sym, ct)
+             | None -> None)
+         in
+         Some (Sym.pp_string fn_sym, params)
+       | _ -> None)
+    sigm.A.function_definitions
+
 (** Compile and run the instrumented file as a subprocess.
     Returns the exit code. *)
 let compile_and_run ~cc ~output_dir ~instrumented_file =
@@ -155,6 +176,7 @@ let generate_bi_abd
       let _startup_sym, sigm = ail_prog in
       let struct_defs = extract_struct_defs sigm in
       let pred_defs = extract_pred_defs prog5 in
+      let function_args = extract_function_args sigm in
       let output_dir =
         Common.mk_dir_if_not_exist_maybe_tmp ~mktemp:true Instrument None
       in
@@ -207,6 +229,7 @@ let generate_bi_abd
             ~heap_file
             ~pred_defs
             ~struct_defs
+            ~function_args
         in
         Printf.printf "\n";
         let doc = Bi_abduction.Infer.pp_suggestions specs in

@@ -103,6 +103,7 @@ let infer_function
       ~(config : Enumerator.config)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
+      ~(function_args : (string * (string * Sctypes.t) list) list)
       ~(heap_lookup : int64 -> int64 option)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
@@ -160,17 +161,34 @@ let infer_function
     (item "memory graph"
        (!^(Printf.sprintf "%d nodes, %d anchors, %d missing"
               graph_nodes graph_anchors graph_missing))));
-  (* Extract function arguments as (Sym.t * BaseTypes.t) pairs *)
+  let signature_args =
+    Option.value ~default:[] (StdList.assoc_opt func_name function_args)
+  in
+  let signature_arg_type name = StdList.assoc_opt name signature_args in
+  let arg_bt_of_ct (ct : Sctypes.t) : BaseTypes.t =
+    match ct with
+    | Sctypes.Pointer _ -> BaseTypes.Loc ()
+    | _ -> Integer
+  in
+  let arg_of_var (v : Data_point.var_binding) : Enumerator.arg =
+    let sym = Sym.fresh v.name in
+    match signature_arg_type v.name with
+    | Some (Sctypes.Pointer ((Sctypes.Void | Sctypes.Function _) as _ct)) ->
+      { sym; bt = BaseTypes.Loc (); owned_ct = None }
+    | Some (Sctypes.Pointer ct) ->
+      { sym; bt = BaseTypes.Loc (); owned_ct = Some ct }
+    | Some ct ->
+      { sym; bt = arg_bt_of_ct ct; owned_ct = None }
+    | None ->
+      let bt : BaseTypes.t =
+        if v.size = 8 then Loc ()
+        else Integer
+      in
+      { sym; bt; owned_ct = None }
+  in
+  (* Extract function arguments with actual pointee types when available. *)
   let args =
-    StdList.map
-      (fun (v : Data_point.var_binding) ->
-         let sym = Sym.fresh v.name in
-         let bt : BaseTypes.t =
-           if v.size = 8 then Loc ()
-           else Integer
-         in
-         (sym, bt))
-      representative_dp.pre_vars
+    StdList.map arg_of_var representative_dp.pre_vars
   in
   (* Build variable name → address mapping for predicate connectivity check *)
   let var_addrs =
@@ -270,6 +288,7 @@ let infer
       ~(heap_lookup : int64 -> int64 option)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
+      ~(function_args : (string * (string * Sctypes.t) list) list)
   : inferred_spec list
   =
   let open Pp in
@@ -289,7 +308,7 @@ let infer
   StdList.map
     (fun (func_name, dps) ->
        infer_function ~config ~pred_defs ~struct_defs
-         ~heap_lookup ~func_name ~dps)
+         ~function_args ~heap_lookup ~func_name ~dps)
     grouped
 
 (** Pretty-print inferred specifications as CN annotation suggestions. *)
@@ -357,6 +376,7 @@ let infer_from_files
       ~(heap_file : string)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
+      ~(function_args : (string * (string * Sctypes.t) list) list)
   : inferred_spec list
   =
   Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
@@ -367,4 +387,4 @@ let infer_from_files
     (Pp.item "heap dumps"
        (Pp.string (Printf.sprintf "%d entries" (StdList.length heap_dumps)))));
   let heap_lookup = Data_point.heap_lookup heap_dumps in
-  infer ~config ~execution_data ~heap_lookup ~pred_defs ~struct_defs
+  infer ~config ~execution_data ~heap_lookup ~pred_defs ~struct_defs ~function_args

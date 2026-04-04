@@ -10,6 +10,12 @@ module Int64Set = Data_point.Int64Set
 module IT = IndexTerms
 module BT = IndexTerms.BT
 
+type arg =
+  { sym : Sym.t;
+    bt : BaseTypes.t;
+    owned_ct : Sctypes.t option
+  }
+
 type config =
   { max_term_depth : int;
     max_qualifiers : int;
@@ -47,40 +53,40 @@ let rec bt_to_internal : BaseTypes.t -> BT.t = function
 
 (** Generate base pointer terms from function arguments. *)
 let base_pointer_terms
-      (args : (Sym.t * BaseTypes.t) list)
+      (args : arg list)
       (loc : Locations.t)
   : IT.t list
   =
   args
-  |> StdList.filter_map (fun (sym, bt) ->
-    match bt with
-    | BaseTypes.Loc _ -> Some (IT.sym_ (sym, bt_to_internal bt, loc))
+  |> StdList.filter_map (fun (arg : arg) ->
+    match arg.bt with
+    | BaseTypes.Loc _ -> Some (IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
     | _ -> None)
 
 (** Generate in-scope variable terms matching a requested base type.
     For predicate iargs, prefer terms other than the root pointer first so that
     segment-like predicates choose a distinct boundary variable when available. *)
 let arg_terms_for_bt
-      ~(args : (Sym.t * BaseTypes.t) list)
+      ~(args : arg list)
       ~(loc : Locations.t)
       ~(preferred_not : Sym.t option)
       ~(bt : BaseTypes.t)
   : IT.t list
   =
   let matching =
-    StdList.filter (fun (_sym, arg_bt) -> BaseTypes.equal arg_bt bt) args
+    StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt) args
   in
   let matching =
     match preferred_not with
     | None -> matching
     | Some avoid_sym ->
       let preferred, fallback =
-        StdList.partition (fun (sym, _bt) -> not (Sym.equal sym avoid_sym)) matching
+        StdList.partition (fun (arg : arg) -> not (Sym.equal arg.sym avoid_sym)) matching
       in
       preferred @ fallback
   in
   StdList.map
-    (fun (sym, bt) -> IT.sym_ (sym, bt_to_internal bt, loc))
+    (fun (arg : arg) -> IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
     matching
 
 (** Cartesian product of choice lists. *)
@@ -92,24 +98,21 @@ let rec combinations : 'a list list -> 'a list list = function
       (fun x -> StdList.map (fun suffix -> x :: suffix) rest_combos)
       xs
 
-(** Generate Owned qualifiers for each pointer argument and each struct type. *)
+(** Generate Owned qualifiers from the actual pointee type of each pointer
+    argument. *)
 let owned_qualifiers
-      ~(args : (Sym.t * BaseTypes.t) list)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
+      ~(args : arg list)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
-  let ptr_terms = base_pointer_terms args loc in
-  let struct_types =
-    Sym.Map.fold (fun tag _fields acc -> Sctypes.Struct tag :: acc)
-      struct_defs []
-  in
-  StdList.concat_map
-    (fun ptr_term ->
-       StdList.map
-         (fun ct -> Qualifier.owned ~ct ~pointer:ptr_term)
-         struct_types)
-    ptr_terms
+  StdList.filter_map
+    (fun (arg : arg) ->
+       match arg.owned_ct with
+       | None -> None
+       | Some ct ->
+         let ptr_term = IT.sym_ (arg.sym, bt_to_internal arg.bt, loc) in
+         Some (Qualifier.owned ~ct ~pointer:ptr_term))
+    args
 
 (** Extract access paths from a recursive predicate definition.
     Returns the field names that the predicate traverses when unfolding. *)
@@ -134,7 +137,7 @@ let traversal_fields
     pattern matches the memory graph structure. *)
 let predicate_qualifiers
       ~(config : config)
-      ~(args : (Sym.t * BaseTypes.t) list)
+      ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(graph : Memory_graph.t)
       ~(var_addrs : (string * int64) list)
@@ -199,7 +202,7 @@ let predicate_qualifiers
 (** Main enumeration entry point. *)
 let enumerate
       ~(config : config)
-      ~(args : (Sym.t * BaseTypes.t) list)
+      ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(graph : Memory_graph.t)
@@ -207,7 +210,8 @@ let enumerate
       ~(loc : Locations.t)
   : Qualifier.t list
   =
-  let owned_qs = owned_qualifiers ~args ~struct_defs ~loc in
+  ignore struct_defs;
+  let owned_qs = owned_qualifiers ~args ~loc in
   Pp.debug 4 (lazy (Pp.item "enum: owned qualifiers" (Pp.int (StdList.length owned_qs))));
   let pred_qs =
     predicate_qualifiers ~config ~args ~pred_defs ~graph ~var_addrs ~loc
