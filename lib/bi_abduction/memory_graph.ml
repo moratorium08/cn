@@ -59,15 +59,15 @@ let build
   =
   let missing_set =
     Int64Set.union
-      (Data_point.missing_addr_set dp.pre_missing)
-      (Data_point.missing_addr_set dp.post_missing)
+      (Data_point.missing_addr_set dp.body_missing)
+      (Data_point.missing_addr_set dp.post_remaining)
   in
   let anchor_addrs =
     StdList.fold_left
       (fun acc (v : Data_point.var_binding) ->
          Int64Set.add v.value acc)
       Int64Set.empty
-      (dp.pre_vars @ dp.post_vars)
+      dp.pre_vars
   in
   Pp.debug 4 (lazy (Pp.item "graph: anchors"
     (Pp.int (Int64Set.cardinal anchor_addrs))));

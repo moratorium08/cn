@@ -28,6 +28,7 @@ typedef struct cn_abd_frame {
   hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
+  hash_table *post_remaining;   /* leak check remainder = postcondition */
   struct cn_abd_frame *prev;
 } cn_abd_frame;
 
@@ -37,6 +38,7 @@ _Bool cn_abd_is_enabled(void);
 void cn_abd_push_frame(const char *func_name);
 void cn_abd_pop_frame(void);
 void cn_abd_record_missing(__cerbty_uintptr_t addr, __cerbty_size_t size);
+void cn_abd_record_post_remaining(__cerbty_uintptr_t addr, __cerbty_size_t size);
 void cn_abd_record_var(
     const char *name, __cerbty_uintptr_t value, __cerbty_size_t size, const char *type_name);
 void cn_abd_mark_post(void);
@@ -73,6 +75,7 @@ typedef struct cn_abd_frame {
   hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
+  hash_table *post_remaining; /* leak check remainder = postcondition */
   struct cn_abd_frame *prev;  /* caller's frame */
 } cn_abd_frame;
 
@@ -82,6 +85,7 @@ bool cn_abd_is_enabled(void);
 void cn_abd_push_frame(const char *func_name);
 void cn_abd_pop_frame(void);
 void cn_abd_record_missing(uintptr_t addr, size_t size);
+void cn_abd_record_post_remaining(uintptr_t addr, size_t size);
 void cn_abd_record_var(
     const char *name, uintptr_t value, size_t size, const char *type_name);
 void cn_abd_mark_post(void);
