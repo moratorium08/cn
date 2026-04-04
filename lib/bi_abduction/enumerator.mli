@@ -1,5 +1,11 @@
 (** Bounded enumeration of candidate qualifiers. *)
 
+type arg =
+  { sym : Sym.t;
+    bt : BaseTypes.t;
+    owned_ct : Sctypes.t option
+  }
+
 type config =
   { max_term_depth : int;
     max_qualifiers : int;
@@ -11,7 +17,7 @@ val default_config : config
 
 (** Generate base pointer terms from function arguments. *)
 val base_pointer_terms
-  :  (Sym.t * BaseTypes.t) list ->
+  :  arg list ->
   Locations.t ->
   IndexTerms.t list
 
@@ -24,7 +30,7 @@ val traversal_fields
 (** Enumerate candidate qualifiers for a function. *)
 val enumerate
   :  config:config ->
-  args:(Sym.t * BaseTypes.t) list ->
+  args:arg list ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->
   struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
   graph:Memory_graph.t ->

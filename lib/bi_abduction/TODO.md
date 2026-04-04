@@ -97,9 +97,21 @@ Example of what's missing: `take X = Owned<struct node>(p); take Y = IntList(X.n
 
 ## Argument type inference
 
-`v.size = 8 → Loc ()` is a crude heuristic. An 8-byte integer would be misclassified as a pointer. This could generate spurious `Owned`/predicate candidates for non-pointer arguments.
+The baseline enumerator now uses the function signature to recover parameter
+types, so pointer arguments can generate `Owned` candidates from their actual
+pointee type (e.g. `int *p` -> `RW<int>(p)` rather than only struct-based
+candidates).
 
-**Fix**: Use the actual C type from the function signature. The type information is available in `sigm.declarations` — thread it through to `cn_abd_record_var` and include it in the JSON output.
+Remaining gaps:
+- fallback inference still uses `v.size = 8 → Loc ()` when signature metadata is
+  unavailable,
+- predicate iarg matching still only looks at coarse `BaseTypes.t`, not full C
+  types,
+- runtime JSON still records `"auto"` rather than the precise parameter type, so
+  the type information is not preserved independently of the frontend.
+
+**Further work**: Thread precise C types more systematically through the runtime
+and inference pipeline, and use them for richer ranking/disambiguation.
 
 
 ## Return value
@@ -114,6 +126,40 @@ The post-condition doesn't reference `return`. We don't capture the function's r
 Only function arguments are used as anchors. Global variables that the function accesses are invisible to the inference.
 
 **Fix**: Record global variable addresses in `cn_abd_record_var`. Add them as additional anchors in the memory graph and as base terms in the enumerator.
+
+
+## Predicate footprints are not checked semantically
+
+Current recursive-predicate footprint computation does **not** evaluate the
+predicate body on the concrete heap. In `footprint.ml`, predicate candidates are
+handled by `predicate_footprint_from_graph`, which:
+
+- resolves only the root pointer,
+- ignores predicate iargs,
+- ignores clause guards and `assert(...)`,
+- ignores return equations,
+- and approximates the footprint as "reachable struct bytes intersected with the
+  missing set".
+
+This means a predicate can be suggested even when it is semantically impossible
+on the observed heap. Example: `extra_predicate_body_ignored.c` defines
+`NegList(p)` with `assert(H.val < 0)`, but the observed list has positive
+values; the current machinery still suggests `NegList(p)` because the heap shape
+matches.
+
+In the terms of IDEA.md, this means the implementation is not really checking
+whether `F(q, d) ≠ ⊥` for predicate candidates; it is using a shape heuristic
+instead.
+
+**Fix options:**
+- Re-evaluate candidate predicates with the executable CN/Fulminate semantics on
+  the recorded concrete heap and variable environment, and reject candidates
+  whose execution fails.
+- Or implement a dedicated concrete predicate interpreter in OCaml that follows
+  the predicate clauses, checks guards/assertions, and returns the precise
+  consumed footprint.
+
+Without this, recursive predicate suggestions remain only shape-based guesses.
 
 
 ## `traversal_fields` stub
