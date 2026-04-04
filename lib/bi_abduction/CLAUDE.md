@@ -79,6 +79,9 @@ See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 ## Testing
 
 ```bash
+# Curated bi-abduction regression suite
+tests/run-bi-abd.sh
+
 # Simple struct (Owned inference)
 cn bi-abd tests/bi-abd/simple_struct_nospec.c
 
