@@ -57,6 +57,41 @@ let base_pointer_terms
     | BaseTypes.Loc _ -> Some (IT.sym_ (sym, bt_to_internal bt, loc))
     | _ -> None)
 
+(** Generate in-scope variable terms matching a requested base type.
+    For predicate iargs, prefer terms other than the root pointer first so that
+    segment-like predicates choose a distinct boundary variable when available. *)
+let arg_terms_for_bt
+      ~(args : (Sym.t * BaseTypes.t) list)
+      ~(loc : Locations.t)
+      ~(preferred_not : Sym.t option)
+      ~(bt : BaseTypes.t)
+  : IT.t list
+  =
+  let matching =
+    StdList.filter (fun (_sym, arg_bt) -> BaseTypes.equal arg_bt bt) args
+  in
+  let matching =
+    match preferred_not with
+    | None -> matching
+    | Some avoid_sym ->
+      let preferred, fallback =
+        StdList.partition (fun (sym, _bt) -> not (Sym.equal sym avoid_sym)) matching
+      in
+      preferred @ fallback
+  in
+  StdList.map
+    (fun (sym, bt) -> IT.sym_ (sym, bt_to_internal bt, loc))
+    matching
+
+(** Cartesian product of choice lists. *)
+let rec combinations : 'a list list -> 'a list list = function
+  | [] -> [ [] ]
+  | xs :: rest ->
+    let rest_combos = combinations rest in
+    StdList.concat_map
+      (fun x -> StdList.map (fun suffix -> x :: suffix) rest_combos)
+      xs
+
 (** Generate Owned qualifiers for each pointer argument and each struct type. *)
 let owned_qualifiers
       ~(args : (Sym.t * BaseTypes.t) list)
@@ -135,15 +170,26 @@ let predicate_qualifiers
                   (Printf.sprintf "enum: pred %s(%s) connects=%b"
                      (Sym.pp_string pred_name) sym_name connects)));
                 if connects then begin
-                  let q = Qualifier.predicate
-                    ~name:pred_name
-                    ~pointer:ptr_term
-                    ~iargs:(StdList.map
-                      (fun (iarg_sym, iarg_bt) ->
-                         IT.sym_ (iarg_sym, bt_to_internal iarg_bt, loc))
-                      pred_def.iargs)
+                  let iarg_choices =
+                    StdList.map
+                      (fun (_iarg_sym, iarg_bt) ->
+                         arg_terms_for_bt ~args ~loc ~preferred_not:(Some sym) ~bt:iarg_bt)
+                      pred_def.iargs
                   in
-                  q :: acc
+                  if StdList.exists (function [] -> true | _ -> false) iarg_choices then
+                    acc
+                  else
+                    let iarg_combos = combinations iarg_choices in
+                    let new_qs =
+                      StdList.map
+                        (fun iargs ->
+                           Qualifier.predicate
+                             ~name:pred_name
+                             ~pointer:ptr_term
+                             ~iargs)
+                        iarg_combos
+                    in
+                    new_qs @ acc
                 end else
                   acc
               end)

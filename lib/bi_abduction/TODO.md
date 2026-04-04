@@ -132,6 +132,23 @@ The cover algorithm only uses positive data (missing addresses). Addresses that 
 **Fix**: For each candidate, check that its footprint doesn't cover addresses the function demonstrably does NOT need. Define "not needed" as addresses in the heap dump neighborhood that are not in the missing set. This requires care — absence from the missing set could mean "already owned" or "truly not needed".
 
 
+## Ranking / candidate preference
+
+Some problematic examples are better understood as **ranking** issues rather than
+baseline inference bugs:
+
+- `extra_nonrecursive_predicate_ignored.c`: preferring `PairCell(p)` over the
+  lower-level `RW<struct pair>(p)` requires a policy for ranking equivalent
+  candidates, not just better enumeration.
+- `extra_wrong_struct_type.c`: when several candidates cover the same concrete
+  bytes, preferring the one whose type best matches the source-level signature
+  is also a ranking / disambiguation problem.
+
+These are still important, but they should be tracked separately from the core
+baseline issues like pre/post splitting, multi-run generalisation, or invalid
+out-of-scope predicate arguments.
+
+
 ## Interprocedural inference
 
 Each function is inferred independently. The plan (IDEA.md) describes propagating specs across call boundaries: if `f` calls `g`, and we've inferred `g`'s spec, use that to refine `f`'s inference (the callee's pre becomes the caller's obligation, the callee's post becomes the caller's available resources).
