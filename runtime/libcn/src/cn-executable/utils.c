@@ -295,7 +295,7 @@ static void abd_leak_collect_cb(
   signed long depth = *(signed long *)ctx;
   if (v > depth) {
     for (rmap_key_t addr = k0; addr <= k1; addr++) {
-      cn_abd_record_missing(addr, 1);
+      cn_abd_record_post_remaining(addr, 1);
     }
   }
 }

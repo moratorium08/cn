@@ -28,9 +28,10 @@ typedef struct abd_data_point {
   hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
-  hash_table *post_missing;
-  hash_table *post_vars;
-  int post_var_count;
+  hash_table *body_missing;     /* body auto-grants = precondition needs */
+  hash_table *body_vars;
+  int body_var_count;
+  hash_table *post_remaining;   /* leak check remainder = postcondition */
   struct abd_data_point *next;
 } abd_data_point;
 
@@ -69,6 +70,7 @@ void cn_abd_push_frame(const char *func_name) {
   frame->pre_missing = NULL;
   frame->pre_vars = NULL;
   frame->pre_var_count = 0;
+  frame->post_remaining = NULL;
   frame->prev = current_frame;
   current_frame = frame;
 }
@@ -85,9 +87,10 @@ void cn_abd_pop_frame(void) {
   dp->pre_missing = frame->pre_missing;
   dp->pre_vars = frame->pre_vars;
   dp->pre_var_count = frame->pre_var_count;
-  dp->post_missing = frame->missing;      /* current M is post_M */
-  dp->post_vars = frame->vars;            /* current V is post_V */
-  dp->post_var_count = frame->var_count;
+  dp->body_missing = frame->missing;        /* body auto-grants = precondition */
+  dp->body_vars = frame->vars;
+  dp->body_var_count = frame->var_count;
+  dp->post_remaining = frame->post_remaining; /* leak check remainder = postcondition */
   dp->next = NULL;
 
   if (data_points_tail != NULL) {
@@ -97,7 +100,9 @@ void cn_abd_pop_frame(void) {
   }
   data_points_tail = dp;
 
-  /* Merge callee's missing addresses into parent's M (RETURN rule) */
+  /* Merge callee's missing addresses into parent's M (RETURN rule: M'' = M ∪ M')
+     Only body_missing (precondition needs) propagates to caller.
+     post_remaining (postcondition) is recorded in the data point but NOT merged. */
   cn_abd_frame *parent = frame->prev;
   if (parent != NULL) {
     /* Merge pre_missing into parent */
@@ -109,7 +114,7 @@ void cn_abd_pop_frame(void) {
         }
       }
     }
-    /* Merge post_missing into parent */
+    /* Merge body_missing into parent (M'' = M ∪ M') */
     if (frame->missing != NULL) {
       hash_table_iterator it = ht_iterator(frame->missing);
       while (ht_next(&it)) {
@@ -118,6 +123,7 @@ void cn_abd_pop_frame(void) {
         }
       }
     }
+    /* NOTE: post_remaining is NOT merged — it's f's postcondition, not caller's obligation */
   }
 
   current_frame = parent;
@@ -196,6 +202,24 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
   dump_heap_neighborhood(current_frame->function_name, addr);
 }
 
+void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
+  if (!abd_enabled || current_frame == NULL)
+    return;
+
+  if (current_frame->post_remaining == NULL)
+    current_frame->post_remaining = ht_create(&abd_alloc);
+
+  int64_t key = (int64_t)addr;
+  if (ht_get(current_frame->post_remaining, &key) != NULL)
+    return; /* Already recorded */
+
+  int64_t *heap_key = malloc(sizeof(int64_t));
+  *heap_key = (int64_t)addr;
+  int64_t *size_val = malloc(sizeof(int64_t));
+  *size_val = (int64_t)size;
+  ht_set(current_frame->post_remaining, heap_key, size_val);
+}
+
 void cn_abd_record_var(
     const char *name, uintptr_t value, size_t size, const char *type_name) {
   if (!abd_enabled || current_frame == NULL)
@@ -266,7 +290,7 @@ void cn_abd_dump_summary(FILE *out) {
   if (!abd_enabled || out == NULL)
     return;
 
-  fprintf(out, "{\"version\":1,\"data_points\":[");
+  fprintf(out, "{\"version\":2,\"data_points\":[");
 
   abd_data_point *dp = data_points_head;
   bool first = true;
@@ -278,10 +302,10 @@ void cn_abd_dump_summary(FILE *out) {
     dump_vars_json(out, dp->pre_vars, dp->pre_var_count);
     fprintf(out, ",\"missing\":");
     dump_missing_json(out, dp->pre_missing);
-    fprintf(out, "},\"post\":{\"vars\":");
-    dump_vars_json(out, dp->post_vars, dp->post_var_count);
-    fprintf(out, ",\"missing\":");
-    dump_missing_json(out, dp->post_missing);
+    fprintf(out, "},\"body\":{\"missing\":");
+    dump_missing_json(out, dp->body_missing);
+    fprintf(out, "},\"post\":{\"remaining\":");
+    dump_missing_json(out, dp->post_remaining);
     fprintf(out, "}}");
 
     first = false;

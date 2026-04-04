@@ -82,20 +82,20 @@ let build_struct_layouts
        StdList.rev rev_layout)
     struct_defs
 
-(** Compute the must-cover set from data points for a function.
-    Uses union of missing addresses across all data points so that
-    addresses seen in any execution are considered. *)
-let must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
+(** Compute the pre-condition must-cover set: union of body_missing
+    (body auto-grants = precondition needs) across all data points. *)
+let pre_must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
   StdList.fold_left
     (fun acc (dp : Data_point.data_point) ->
-       Int64Set.union acc (Data_point.missing_addr_set dp.Data_point.pre_missing))
+       Int64Set.union acc (Data_point.missing_addr_set dp.body_missing))
     Int64Set.empty dps
 
-(** Compute the must-cover set for post-conditions. *)
+(** Compute the post-condition must-cover set: union of post_remaining
+    (leak check remainder = postcondition) across all data points. *)
 let post_must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
   StdList.fold_left
     (fun acc (dp : Data_point.data_point) ->
-       Int64Set.union acc (Data_point.missing_addr_set dp.Data_point.post_missing))
+       Int64Set.union acc (Data_point.missing_addr_set dp.post_remaining))
     Int64Set.empty dps
 
 (** Run the inference pipeline for one function. *)
@@ -122,22 +122,22 @@ let infer_function
     StdList.fold_left
       (fun best (dp : Data_point.data_point) ->
          let n =
-           StdList.length dp.pre_missing + StdList.length dp.post_missing
+           StdList.length dp.body_missing + StdList.length dp.post_remaining
          in
          let best_n =
-           StdList.length best.Data_point.pre_missing
-           + StdList.length best.Data_point.post_missing
+           StdList.length best.Data_point.body_missing
+           + StdList.length best.Data_point.post_remaining
          in
          if n > best_n then dp else best)
       (StdList.hd dps)
       dps
   in
   Pp.debug 3 (lazy begin
-    let pre_n = StdList.length representative_dp.Data_point.pre_missing in
-    let post_n = StdList.length representative_dp.Data_point.post_missing in
+    let body_n = StdList.length representative_dp.Data_point.body_missing in
+    let post_n = StdList.length representative_dp.Data_point.post_remaining in
     item "representative data point"
-      (!^"pre_missing:" ^^^ Pp.int pre_n ^^^
-       !^"post_missing:" ^^^ Pp.int post_n)
+      (!^"body_missing:" ^^^ Pp.int body_n ^^^
+       !^"post_remaining:" ^^^ Pp.int post_n)
   end);
   Pp.debug 3 (lazy begin
     item "variables"
@@ -188,7 +188,7 @@ let infer_function
     Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
     candidates;
   (* Compute footprints for pre-condition candidates *)
-  let pre_must = must_cover_set dps in
+  let pre_must = pre_must_cover_set dps in
   Pp.debug 3 (lazy
     (item "pre must-cover" (Pp.int (Int64Set.cardinal pre_must) ^^^ !^"bytes")));
   let pre_candidates =
@@ -248,11 +248,11 @@ let infer_function
   (* Analyse which variables' memory ranges are missing *)
   let pre_analysis =
     analyse_missing_vars representative_dp.Data_point.pre_vars
-      representative_dp.pre_missing
+      representative_dp.body_missing
   in
   let post_analysis =
     analyse_missing_vars representative_dp.pre_vars
-      representative_dp.post_missing
+      representative_dp.post_remaining
   in
   { function_name = func_name;
     pre_qualifiers = pre_result.selected;
