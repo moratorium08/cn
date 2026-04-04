@@ -186,9 +186,6 @@ baseline inference bugs:
 - `extra_nonrecursive_predicate_ignored.c`: preferring `PairCell(p)` over the
   lower-level `RW<struct pair>(p)` requires a policy for ranking equivalent
   candidates, not just better enumeration.
-- `extra_wrong_struct_type.c`: when several candidates cover the same concrete
-  bytes, preferring the one whose type best matches the source-level signature
-  is also a ranking / disambiguation problem.
 
 These are still important, but they should be tracked separately from the core
 baseline issues like pre/post splitting, multi-run generalisation, or invalid
