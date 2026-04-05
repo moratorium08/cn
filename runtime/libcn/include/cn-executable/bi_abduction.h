@@ -23,8 +23,6 @@ typedef struct cn_abd_var_entry {
 typedef struct cn_abd_frame {
   const char *function_name;
   hash_table *missing;
-  hash_table *vars;
-  int var_count;
   hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
@@ -69,9 +67,7 @@ typedef struct cn_abd_var_entry {
 typedef struct cn_abd_frame {
   const char *function_name;
   hash_table *missing;        /* M: address (int64_t) -> size (int64_t*) */
-  hash_table *vars;           /* V: sequential index (int64_t) -> cn_abd_var_entry* */
-  int var_count;
-  /* Snapshot of pre-state (set by cn_abd_mark_post) */
+  /* Entry variables: sequential index (int64_t) -> cn_abd_var_entry* */
   hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
