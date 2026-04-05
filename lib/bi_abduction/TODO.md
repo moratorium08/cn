@@ -216,6 +216,26 @@ This is by design (see IDEA.md §1 on concrete vs. symbolic trade-offs), but mea
 - Multiple diverse executions increase confidence
 
 
+## Runtime memory cleanup
+
+The current bi-abduction runtime intentionally leaks its bookkeeping state until
+process exit. In `runtime/libcn/src/cn-executable/bi_abduction.c`,
+`cn_abd_destroy()` just drops global pointers; it does not walk and free the
+frame/data-point lists or destroy their hash tables.
+
+Relatedly, the runtime currently uses a custom allocator wrapper with a no-op
+`free` for bi-abduction tables. This is only tolerable because the
+instrumented process is assumed to be short-lived.
+
+**Fix**:
+- Switch the bi-abduction tables to a normal allocator (`fulm_default_alloc`
+  should be enough unless there is a stronger lifetime reason not to).
+- Make `cn_abd_destroy()` actually free the collected frames/data points and
+  call `ht_destroy()` on owned hash tables.
+- Keep the ownership/missing-state lifetime explicit, rather than relying on
+  process exit to reclaim memory.
+
+
 ## Output integration
 
 Suggestions are printed as comments, not integrated back into the source file. Ideally, `cn bi-abd` should be able to rewrite the source file with the suggested specs inserted, or at least produce a diff/patch.
