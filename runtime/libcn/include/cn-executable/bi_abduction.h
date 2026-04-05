@@ -86,6 +86,9 @@ void cn_abd_record_var(
     const char *name, uintptr_t value, size_t size, const char *type_name);
 void cn_abd_mark_post(void);
 void cn_abd_dump_summary(FILE *out);
+/* Dump [addr, addr+size) as an 8-byte-word JSONL entry to the heap output file.
+   Called by cn_abd_snapshot_owned_heap (utils.c) at function entry/exit. */
+void cn_abd_dump_heap_range(const char *func_name, uintptr_t addr, size_t size);
 
 #ifdef __cplusplus
 }

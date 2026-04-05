@@ -161,6 +161,9 @@ signed long get_cn_stack_depth(void);
 void ghost_stack_depth_incr(void);
 void ghost_stack_depth_decr(void);
 void cn_postcondition_leak_check(void);
+/* Dump all currently ghost-state-owned addresses to the bi-abduction heap output.
+   Called at function entry/exit by cn_abd_push_frame / cn_abd_pop_frame. */
+void cn_abd_snapshot_owned_heap(const char *func_name);
 
 struct loop_ownership* initialise_loop_ownership_state(void);
 void cn_loop_leak_check(void);

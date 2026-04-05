@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <cn-executable/bi_abduction.h>
+#include <cn-executable/utils.h>
 
 /* Allocator: use stdlib malloc (not bump allocator) because bi-abductive state
    must persist beyond cn_bump_free_after which reclaims per-function bump memory. */
@@ -122,6 +123,8 @@ void cn_abd_push_frame(const char *func_name) {
   if (!abd_enabled)
     return;
 
+  /* Snapshot owned heap at function entry before any ownership transfers. */
+  cn_abd_snapshot_owned_heap(func_name);
   current_frame = abd_new_frame(func_name, current_frame);
 }
 
@@ -131,6 +134,8 @@ void cn_abd_pop_frame(void) {
 
   cn_abd_frame *frame = current_frame;
 
+  /* Snapshot owned heap at function exit after all ownership transfers. */
+  cn_abd_snapshot_owned_heap(frame->function_name);
   abd_append_data_point(frame);
 
   /* Merge callee's missing addresses into parent's M (RETURN rule: M'' = M ∪ M')
@@ -158,16 +163,14 @@ static void safe_read_handler(int sig) {
     siglongjmp(jmp_env, 1);
 }
 
-/* Dump heap neighborhood around an address to heap_output (JSONL) */
-static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
-  if (heap_output == NULL)
+/* Dump a range of heap memory [addr, addr+size) to heap_output (JSONL).
+   Used at function entry/exit to snapshot all ghost-state-owned addresses. */
+void cn_abd_dump_heap_range(const char *func_name, uintptr_t addr, size_t size) {
+  if (heap_output == NULL || size == 0)
     return;
 
-  /* Radius: 64 bytes in each direction, 8-byte aligned */
-  const size_t radius = 64;
-  uintptr_t aligned = addr & ~(uintptr_t)7;
-  uintptr_t base = (aligned >= radius) ? aligned - radius : 0;
-  uintptr_t end = (addr & ~(uintptr_t)7) + radius;
+  uintptr_t base = addr & ~(uintptr_t)7;
+  uintptr_t end  = (addr + size + 7) & ~(uintptr_t)7;  /* round up to 8-byte boundary */
 
   struct sigaction sa_new, sa_old_segv, sa_old_bus;
   sa_new.sa_handler = safe_read_handler;
@@ -180,7 +183,7 @@ static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
       func_name, addr);
 
   bool first = true;
-  for (uintptr_t a = base; a <= end; a += 8) {
+  for (uintptr_t a = base; a < end; a += 8) {
     in_safe_read = 1;
     if (sigsetjmp(jmp_env, 1) == 0) {
       uint64_t val = *(volatile uint64_t *)a;
@@ -191,14 +194,13 @@ static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
       first = false;
     } else {
       in_safe_read = 0;
-      /* SIGSEGV/SIGBUS: skip this address */
+      /* SIGSEGV/SIGBUS: skip this word */
     }
   }
 
   fprintf(heap_output, "}}\n");
   fflush(heap_output);
 
-  /* Restore original signal handlers */
   sigaction(SIGSEGV, &sa_old_segv, NULL);
   sigaction(SIGBUS, &sa_old_bus, NULL);
 }
@@ -213,9 +215,6 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
       return;
   }
   abd_record_addr_size(&current_frame->missing, addr, size);
-
-  /* Dump heap neighborhood immediately */
-  dump_heap_neighborhood(current_frame->function_name, addr);
 }
 
 void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {

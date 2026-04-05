@@ -286,6 +286,23 @@ void ghost_stack_depth_decr(void) {
   // cn_printf(CN_LOGGING_INFO, "\n");
 }
 
+/* Callback for rmap_foreach: dump each owned range to the heap output file. */
+static void abd_snapshot_cb(
+    rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx) {
+  (void)v;
+  const char *func_name = (const char *)ctx;
+  size_t size = (size_t)(k1 - k0 + 1);
+  cn_abd_dump_heap_range(func_name, (uintptr_t)k0, size);
+}
+
+/* Dump all currently owned addresses (ghost state entries) at function entry/exit.
+   Called from cn_abd_push_frame and cn_abd_pop_frame in bi_abduction.c. */
+void cn_abd_snapshot_owned_heap(const char *func_name) {
+  if (!cn_abd_is_enabled())
+    return;
+  rmap_foreach(cn_ownership_global_ghost_state, abd_snapshot_cb, (void *)func_name);
+}
+
 /* Callback for rmap_foreach used in bi-abductive leak check */
 static void abd_leak_collect_cb(
     rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx) {
