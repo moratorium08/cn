@@ -38,6 +38,72 @@ typedef struct abd_data_point {
 static abd_data_point *data_points_head = NULL;
 static abd_data_point *data_points_tail = NULL;
 
+static hash_table *abd_new_table(void) {
+  return ht_create(&abd_alloc);
+}
+
+static void abd_reset_live_state(cn_abd_frame *frame) {
+  frame->missing = abd_new_table();
+  frame->vars = abd_new_table();
+  frame->var_count = 0;
+}
+
+static cn_abd_frame *abd_new_frame(const char *func_name, cn_abd_frame *parent) {
+  cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
+  frame->function_name = func_name;
+  abd_reset_live_state(frame);
+  frame->pre_missing = NULL;
+  frame->pre_vars = NULL;
+  frame->pre_var_count = 0;
+  frame->post_remaining = NULL;
+  frame->prev = parent;
+  return frame;
+}
+
+static void abd_record_addr_size(hash_table **table, uintptr_t addr, size_t size) {
+  int64_t key = (int64_t)addr;
+  if (*table == NULL)
+    *table = abd_new_table();
+  if (ht_get(*table, &key) != NULL)
+    return;
+
+  int64_t *heap_key = malloc(sizeof(int64_t));
+  *heap_key = (int64_t)addr;
+  int64_t *size_val = malloc(sizeof(int64_t));
+  *size_val = (int64_t)size;
+  ht_set(*table, heap_key, size_val);
+}
+
+static void abd_merge_missing(hash_table *dst, hash_table *src) {
+  if (src == NULL)
+    return;
+
+  hash_table_iterator it = ht_iterator(src);
+  while (ht_next(&it)) {
+    if (ht_get(dst, it.key) == NULL)
+      ht_set(dst, it.key, it.value);
+  }
+}
+
+static void abd_append_data_point(cn_abd_frame *frame) {
+  abd_data_point *dp = malloc(sizeof(abd_data_point));
+  dp->function_name = frame->function_name;
+  dp->pre_missing = frame->pre_missing;
+  dp->pre_vars = frame->pre_vars;
+  dp->pre_var_count = frame->pre_var_count;
+  dp->body_missing = frame->missing;        /* body auto-grants = precondition */
+  dp->body_vars = frame->vars;
+  dp->body_var_count = frame->var_count;
+  dp->post_remaining = frame->post_remaining; /* leak check remainder = postcondition */
+  dp->next = NULL;
+
+  if (data_points_tail != NULL)
+    data_points_tail->next = dp;
+  else
+    data_points_head = dp;
+  data_points_tail = dp;
+}
+
 void cn_abd_init(FILE *heap_out) {
   abd_enabled = true;
   current_frame = NULL;
@@ -62,17 +128,7 @@ void cn_abd_push_frame(const char *func_name) {
   if (!abd_enabled)
     return;
 
-  cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
-  frame->function_name = func_name;
-  frame->missing = ht_create(&abd_alloc);
-  frame->vars = ht_create(&abd_alloc);
-  frame->var_count = 0;
-  frame->pre_missing = NULL;
-  frame->pre_vars = NULL;
-  frame->pre_var_count = 0;
-  frame->post_remaining = NULL;
-  frame->prev = current_frame;
-  current_frame = frame;
+  current_frame = abd_new_frame(func_name, current_frame);
 }
 
 void cn_abd_pop_frame(void) {
@@ -81,24 +137,7 @@ void cn_abd_pop_frame(void) {
 
   cn_abd_frame *frame = current_frame;
 
-  /* Record data point */
-  abd_data_point *dp = malloc(sizeof(abd_data_point));
-  dp->function_name = frame->function_name;
-  dp->pre_missing = frame->pre_missing;
-  dp->pre_vars = frame->pre_vars;
-  dp->pre_var_count = frame->pre_var_count;
-  dp->body_missing = frame->missing;        /* body auto-grants = precondition */
-  dp->body_vars = frame->vars;
-  dp->body_var_count = frame->var_count;
-  dp->post_remaining = frame->post_remaining; /* leak check remainder = postcondition */
-  dp->next = NULL;
-
-  if (data_points_tail != NULL) {
-    data_points_tail->next = dp;
-  } else {
-    data_points_head = dp;
-  }
-  data_points_tail = dp;
+  abd_append_data_point(frame);
 
   /* Merge callee's missing addresses into parent's M (RETURN rule: M'' = M ∪ M')
      Only body_missing (precondition needs) propagates to caller.
@@ -106,23 +145,9 @@ void cn_abd_pop_frame(void) {
   cn_abd_frame *parent = frame->prev;
   if (parent != NULL) {
     /* Merge pre_missing into parent */
-    if (frame->pre_missing != NULL) {
-      hash_table_iterator it = ht_iterator(frame->pre_missing);
-      while (ht_next(&it)) {
-        if (ht_get(parent->missing, it.key) == NULL) {
-          ht_set(parent->missing, it.key, it.value);
-        }
-      }
-    }
+    abd_merge_missing(parent->missing, frame->pre_missing);
     /* Merge body_missing into parent (M'' = M ∪ M') */
-    if (frame->missing != NULL) {
-      hash_table_iterator it = ht_iterator(frame->missing);
-      while (ht_next(&it)) {
-        if (ht_get(parent->missing, it.key) == NULL) {
-          ht_set(parent->missing, it.key, it.value);
-        }
-      }
-    }
+    abd_merge_missing(parent->missing, frame->missing);
     /* NOTE: post_remaining is NOT merged — it's f's postcondition, not caller's obligation */
   }
 
@@ -188,15 +213,12 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
-  int64_t key = (int64_t)addr;
-  if (ht_get(current_frame->missing, &key) != NULL)
-    return; /* Already recorded */
-
-  int64_t *heap_key = malloc(sizeof(int64_t));
-  *heap_key = (int64_t)addr;
-  int64_t *size_val = malloc(sizeof(int64_t));
-  *size_val = (int64_t)size;
-  ht_set(current_frame->missing, heap_key, size_val);
+  if (current_frame->missing != NULL) {
+    int64_t key = (int64_t)addr;
+    if (ht_get(current_frame->missing, &key) != NULL)
+      return;
+  }
+  abd_record_addr_size(&current_frame->missing, addr, size);
 
   /* Dump heap neighborhood immediately */
   dump_heap_neighborhood(current_frame->function_name, addr);
@@ -206,18 +228,7 @@ void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
-  if (current_frame->post_remaining == NULL)
-    current_frame->post_remaining = ht_create(&abd_alloc);
-
-  int64_t key = (int64_t)addr;
-  if (ht_get(current_frame->post_remaining, &key) != NULL)
-    return; /* Already recorded */
-
-  int64_t *heap_key = malloc(sizeof(int64_t));
-  *heap_key = (int64_t)addr;
-  int64_t *size_val = malloc(sizeof(int64_t));
-  *size_val = (int64_t)size;
-  ht_set(current_frame->post_remaining, heap_key, size_val);
+  abd_record_addr_size(&current_frame->post_remaining, addr, size);
 }
 
 void cn_abd_record_var(
@@ -247,9 +258,7 @@ void cn_abd_mark_post(void) {
   current_frame->pre_var_count = current_frame->var_count;
 
   /* Start fresh for post-state */
-  current_frame->missing = ht_create(&abd_alloc);
-  current_frame->vars = ht_create(&abd_alloc);
-  current_frame->var_count = 0;
+  abd_reset_live_state(current_frame);
 }
 
 /* JSON output helpers */
