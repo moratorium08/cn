@@ -29,8 +29,6 @@ typedef struct abd_data_point {
   hash_table *pre_vars;
   int pre_var_count;
   hash_table *body_missing;     /* body auto-grants = precondition needs */
-  hash_table *body_vars;
-  int body_var_count;
   hash_table *post_remaining;   /* leak check remainder = postcondition */
   struct abd_data_point *next;
 } abd_data_point;
@@ -92,8 +90,6 @@ static void abd_append_data_point(cn_abd_frame *frame) {
   dp->pre_vars = frame->pre_vars;
   dp->pre_var_count = frame->pre_var_count;
   dp->body_missing = frame->missing;        /* body auto-grants = precondition */
-  dp->body_vars = frame->vars;
-  dp->body_var_count = frame->var_count;
   dp->post_remaining = frame->post_remaining; /* leak check remainder = postcondition */
   dp->next = NULL;
 
