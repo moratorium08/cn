@@ -40,18 +40,16 @@ static hash_table *abd_new_table(void) {
   return ht_create(&abd_alloc);
 }
 
-static void abd_reset_live_state(cn_abd_frame *frame) {
+static void abd_reset_missing_state(cn_abd_frame *frame) {
   frame->missing = abd_new_table();
-  frame->vars = abd_new_table();
-  frame->var_count = 0;
 }
 
 static cn_abd_frame *abd_new_frame(const char *func_name, cn_abd_frame *parent) {
   cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
   frame->function_name = func_name;
-  abd_reset_live_state(frame);
+  abd_reset_missing_state(frame);
   frame->pre_missing = NULL;
-  frame->pre_vars = NULL;
+  frame->pre_vars = abd_new_table();
   frame->pre_var_count = 0;
   frame->post_remaining = NULL;
   frame->prev = parent;
@@ -239,9 +237,9 @@ void cn_abd_record_var(
   entry->type_name = type_name;
 
   int64_t *heap_idx = malloc(sizeof(int64_t));
-  *heap_idx = current_frame->var_count;
-  ht_set(current_frame->vars, heap_idx, entry);
-  current_frame->var_count++;
+  *heap_idx = current_frame->pre_var_count;
+  ht_set(current_frame->pre_vars, heap_idx, entry);
+  current_frame->pre_var_count++;
 }
 
 void cn_abd_mark_post(void) {
@@ -250,11 +248,9 @@ void cn_abd_mark_post(void) {
 
   /* Snapshot pre-state */
   current_frame->pre_missing = current_frame->missing;
-  current_frame->pre_vars = current_frame->vars;
-  current_frame->pre_var_count = current_frame->var_count;
 
   /* Start fresh for post-state */
-  abd_reset_live_state(current_frame);
+  abd_reset_missing_state(current_frame);
 }
 
 /* JSON output helpers */
