@@ -199,9 +199,6 @@ _Bool convert_from_cn_bool(cn_bool* b) {
 void cn_assert(cn_bool* cn_b, enum spec_mode spec_mode) {
   // cn_printf(CN_LOGGING_INFO, "[CN: assertion] function %s, file %s, line %d\n", error_msg_info.function_name, error_msg_info.file_name, error_msg_info.line_number);
   if (!(cn_b->val)) {
-    if (cn_abd_is_enabled()) {
-      return;  /* In bi-abductive mode, skip assertion failures */
-    }
     print_error_msg_info(global_error_msg_info);
     cn_failure(CN_FAILURE_ASSERT, spec_mode);
   }
