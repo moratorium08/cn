@@ -88,7 +88,7 @@ Loop invariants are structurally different from pre/post specs — they must hol
 
 ## Qualifier chains
 
-The `Qualifier.chain_step` and `Qualifier.chain` types exist but are never used. Currently each qualifier is independent — flat, not chained.
+Currently each qualifier is independent — flat, not chained.
 
 Example of what's missing: `take X = Owned<struct node>(p); take Y = IntList(X.next);`. The second qualifier depends on the value bound by the first. The enumerator only generates top-level qualifiers from function arguments, not from intermediate bindings.
 
@@ -162,11 +162,11 @@ instead.
 Without this, recursive predicate suggestions remain only shape-based guesses.
 
 
-## `traversal_fields` stub
+## Predicate traversal matching
 
-`enumerator.ml:81-96` has a TODO to walk `LogicalArgumentTypes` (the predicate clause bodies) and extract which struct fields a recursive predicate traverses. Currently predicates are matched purely via memory graph connectivity, which works but is imprecise — it can't distinguish between a `List` predicate (follows `next`) and a hypothetical `ListBackward` predicate (follows `prev`) if both are defined.
+Predicates are currently matched purely via memory graph connectivity, which is imprecise — it can't distinguish between a `List` predicate (follows `next`) and a hypothetical `ListBackward` predicate (follows `prev`) if both are defined.
 
-**Fix**: Pattern-match the predicate definition's `ResourceTypes.request` terms to find `MemberShift` / field access patterns. Build a "traversal signature" per predicate. Compare against the graph's actual pointer chain structure to pick the right predicate.
+**Fix**: Walk `LogicalArgumentTypes` (the predicate clause bodies) to extract which struct fields a recursive predicate traverses. Pattern-match the predicate definition's `ResourceTypes.request` terms to find `MemberShift` / field access patterns. Build a "traversal signature" per predicate. Compare against the graph's actual pointer chain structure to pick the right predicate.
 
 
 ## Negative examples
@@ -248,7 +248,7 @@ Suggestions are printed as comments, not integrated back into the source file. I
 3. **Qualifier chains** — needed for most real predicates (the predicate unfolds through struct fields)
 4. **Return value** — needed for post-conditions like `ensures take R = List(return)`
 5. **Argument type from C signature** — low effort, fixes false positives
-6. **`traversal_fields` implementation** — improves predicate selection precision
+6. **Predicate traversal matching** — improves predicate selection precision
 7. **Iterated separating conjunctions** — needed for arrays
 8. **PBT integration** — multiplies data quality
 9. **Free/malloc tracking** — needed for allocator-heavy code

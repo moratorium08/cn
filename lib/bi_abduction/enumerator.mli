@@ -7,10 +7,7 @@ type arg =
   }
 
 type config =
-  { max_term_depth : int;
-    max_qualifiers : int;
-    max_chain_depth : int;
-    max_pred_unfolding : int
+  { max_qualifiers : int
   }
 
 val default_config : config
@@ -21,18 +18,11 @@ val base_pointer_terms
   Locations.t ->
   IndexTerms.t list
 
-(** Extract access paths from a recursive predicate definition. *)
-val traversal_fields
-  :  Definition.Predicate.t ->
-  struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
-  Id.t list list
-
 (** Enumerate candidate qualifiers for a function. *)
 val enumerate
   :  config:config ->
   args:arg list ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->
-  struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
   graph:Memory_graph.t ->
   var_addrs:(string * int64) list ->
   loc:Locations.t ->

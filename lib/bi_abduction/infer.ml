@@ -217,10 +217,10 @@ let infer_function
   (* Enumerate candidate qualifiers separately for pre and post,
      using their respective heap graphs. *)
   let pre_candidates_raw = Enumerator.enumerate
-    ~config ~args ~pred_defs ~struct_defs ~graph:pre_graph ~var_addrs ~loc
+    ~config ~args ~pred_defs ~graph:pre_graph ~var_addrs ~loc
   in
   let post_candidates_raw = Enumerator.enumerate
-    ~config ~args ~pred_defs ~struct_defs ~graph:post_graph ~var_addrs ~loc
+    ~config ~args ~pred_defs ~graph:post_graph ~var_addrs ~loc
   in
   Pp.debug 4 (lazy
     (item "pre candidates (raw)"

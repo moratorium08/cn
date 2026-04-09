@@ -21,7 +21,6 @@ type missing_entry =
 type data_point =
   { function_name : string;
     pre_vars : var_binding list;
-    pre_missing : missing_entry list;
     body_missing : missing_entry list;    (* body auto-grants = precondition needs *)
     post_remaining : missing_entry list   (* leak check remainder = postcondition *)
   }
@@ -91,41 +90,23 @@ let parse_missing_entry j =
 
 (* --- Data point parsing --- *)
 
-let parse_pre_post j =
-  let vars =
-    json_list (json_field "vars" j) |> StdList.map parse_var_binding
+let parse_data_point j =
+  let pre_obj = json_field "pre" j in
+  let pre_vars =
+    json_list (json_field "vars" pre_obj) |> StdList.map parse_var_binding
   in
-  let missing =
-    json_list (json_field "missing" j) |> StdList.map parse_missing_entry
-  in
-  (vars, missing)
-
-let parse_data_point_v2 j =
-  let pre_vars, pre_missing = parse_pre_post (json_field "pre" j) in
-  let body_obj = json_field "body" j in
   let body_missing =
-    json_list (json_field "missing" body_obj) |> StdList.map parse_missing_entry
+    json_list (json_field "missing" (json_field "body" j))
+    |> StdList.map parse_missing_entry
   in
-  let post_obj = json_field "post" j in
   let post_remaining =
-    json_list (json_field "remaining" post_obj) |> StdList.map parse_missing_entry
+    json_list (json_field "remaining" (json_field "post" j))
+    |> StdList.map parse_missing_entry
   in
   { function_name = json_string (json_field "function" j);
     pre_vars;
-    pre_missing;
     body_missing;
     post_remaining
-  }
-
-(* Backward compat: version 1 has post.missing conflating body + leak *)
-let parse_data_point_v1 j =
-  let pre_vars, pre_missing = parse_pre_post (json_field "pre" j) in
-  let _post_vars, post_missing = parse_pre_post (json_field "post" j) in
-  { function_name = json_string (json_field "function" j);
-    pre_vars;
-    pre_missing;
-    body_missing = post_missing;
-    post_remaining = post_missing
   }
 
 (* --- Summary file parsing --- *)
@@ -133,11 +114,10 @@ let parse_data_point_v1 j =
 let parse_summary_json (filename : string) : execution_data =
   let json = Yojson.Safe.from_file filename in
   let version = json_int (json_field "version" json) in
-  let parse_dp = if version >= 2 then parse_data_point_v2 else parse_data_point_v1 in
   { version;
     data_points =
       json_list (json_field "data_points" json)
-      |> StdList.map parse_dp
+      |> StdList.map parse_data_point
   }
 
 (* --- Heap dump parsing (JSONL) --- *)

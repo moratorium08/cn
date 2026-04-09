@@ -71,7 +71,7 @@ The inference modules use `Pp.debug` at these levels:
 
 See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 
-- **Only postconditions are inferred** — `pre_missing` is always empty because body accesses land in `post_missing`
+- **Only postconditions are inferred** — `body_missing` captures all body ownership failures, which conflates precondition and postcondition needs
 - **Multiple executions break inference** — `must_cover_set` unions addresses from different calls; `exact_cover` only tracks complete covers
 - **No partial spec awareness** — suggested qualifiers may overlap with existing takes
 - **No iterated resources, free/malloc, loop invariants, qualifier chains, return value**

@@ -16,7 +16,6 @@ type missing_entry =
 type data_point =
   { function_name : string;
     pre_vars : var_binding list;
-    pre_missing : missing_entry list;
     body_missing : missing_entry list;    (** body auto-grants = precondition needs *)
     post_remaining : missing_entry list   (** leak check remainder = postcondition *)
   }

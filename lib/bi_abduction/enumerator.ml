@@ -17,17 +17,11 @@ type arg =
   }
 
 type config =
-  { max_term_depth : int;
-    max_qualifiers : int;
-    max_chain_depth : int;
-    max_pred_unfolding : int
+  { max_qualifiers : int
   }
 
 let default_config =
-  { max_term_depth = 3;
-    max_qualifiers = 1000;
-    max_chain_depth = 3;
-    max_pred_unfolding = 100
+  { max_qualifiers = 1000
   }
 
 (** Convert surface BaseTypes.t to internal IndexTerms.BT.t by erasing Loc info. *)
@@ -114,29 +108,9 @@ let owned_qualifiers
          Some (Qualifier.owned ~ct ~pointer:ptr_term))
     args
 
-(** Extract access paths from a recursive predicate definition.
-    Returns the field names that the predicate traverses when unfolding. *)
-let traversal_fields
-      (pred_def : Definition.Predicate.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-  : Id.t list list
-  =
-  ignore struct_defs;
-  match pred_def.clauses with
-  | None -> []
-  | Some clauses ->
-    StdList.filter_map
-      (fun (clause : Definition.Clause.t) ->
-         ignore clause;
-         (* TODO: Walk LogicalArgumentTypes to extract traversal fields.
-            For now, predicates are matched via memory graph connectivity. *)
-         None)
-      clauses
-
 (** Generate predicate qualifiers by checking if a predicate's traversal
     pattern matches the memory graph structure. *)
 let predicate_qualifiers
-      ~(config : config)
       ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(graph : Memory_graph.t)
@@ -144,7 +118,6 @@ let predicate_qualifiers
       ~(loc : Locations.t)
   : Qualifier.t list
   =
-  ignore config;
   let ptr_terms = base_pointer_terms args loc in
   StdList.concat_map
     (fun ptr_term ->
@@ -204,17 +177,15 @@ let enumerate
       ~(config : config)
       ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(graph : Memory_graph.t)
       ~(var_addrs : (string * int64) list)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
-  ignore struct_defs;
   let owned_qs = owned_qualifiers ~args ~loc in
   Pp.debug 4 (lazy (Pp.item "enum: owned qualifiers" (Pp.int (StdList.length owned_qs))));
   let pred_qs =
-    predicate_qualifiers ~config ~args ~pred_defs ~graph ~var_addrs ~loc
+    predicate_qualifiers ~args ~pred_defs ~graph ~var_addrs ~loc
   in
   Pp.debug 4 (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
   let all = owned_qs @ pred_qs in
