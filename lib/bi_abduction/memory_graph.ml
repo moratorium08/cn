@@ -43,7 +43,7 @@ let add_edge src dst edge g =
   in
   { g with adj = Int64Map.add src ((dst, edge) :: existing) g.adj }
 
-(** Build a memory graph from a data point and heap data.
+(** Build a memory graph from function arguments, a missing address set, and heap data.
 
     Uses BFS expansion starting from anchor addresses (function arguments).
     For each address, overlays every struct layout to find fields, then
@@ -51,23 +51,24 @@ let add_edge src dst edge g =
     This allows the graph to trace through linked structures (lists, trees)
     even when intermediate nodes are not in the missing set.
 
+    [pre_vars]      — function argument bindings; used as BFS anchors.
+    [missing_set]   — addresses considered missing for this graph
+                      (body_missing for pre-graph; post_remaining for post-graph).
+    [heap_lookup]   — the phase-appropriate heap snapshot
+                      (Pre+Body dumps for pre-graph; Post dumps for post-graph).
     [struct_layouts] maps struct tag symbols to lists of (field_id, field_offset, field_size). *)
 let build
-      ~(dp : Data_point.data_point)
+      ~(pre_vars : Data_point.var_binding list)
+      ~(missing_set : Int64Set.t)
       ~(heap_lookup : int64 -> int64 option)
       ~(struct_layouts : (Id.t * int * int) list Sym.Map.t)
   =
-  let missing_set =
-    Int64Set.union
-      (Data_point.missing_addr_set dp.body_missing)
-      (Data_point.missing_addr_set dp.post_remaining)
-  in
   let anchor_addrs =
     StdList.fold_left
       (fun acc (v : Data_point.var_binding) ->
          Int64Set.add v.value acc)
       Int64Set.empty
-      dp.pre_vars
+      pre_vars
   in
   Pp.debug 4 (lazy (Pp.item "graph: anchors"
     (Pp.int (Int64Set.cardinal anchor_addrs))));

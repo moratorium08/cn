@@ -19,10 +19,15 @@ val empty : t
 (** Access the per-node info map (for debug/stats). *)
 val info : t -> node_info Int64Map.t
 
-(** Build a memory graph from a data point and heap data.
+(** Build a memory graph from function arguments, a missing address set, and heap data.
+    [pre_vars]     — function argument bindings used as BFS anchors.
+    [missing_set]  — addresses considered missing for this graph
+                     (body_missing for pre-graph; post_remaining for post-graph).
+    [heap_lookup]  — phase-appropriate heap snapshot.
     [struct_layouts] maps struct tags to (field_id, offset, size) triples. *)
 val build
-  :  dp:Data_point.data_point ->
+  :  pre_vars:Data_point.var_binding list ->
+  missing_set:Data_point.Int64Set.t ->
   heap_lookup:(int64 -> int64 option) ->
   struct_layouts:(Id.t * int * int) list Sym.Map.t ->
   t

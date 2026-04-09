@@ -21,7 +21,7 @@ type inferred_spec =
 val infer
   :  config:Enumerator.config
   -> execution_data:Data_point.execution_data
-  -> heap_lookup:(int64 -> int64 option)
+  -> heap_dumps:Data_point.heap_dump list
   -> pred_defs:Definition.Predicate.t Sym.Map.t
   -> struct_defs:(Id.t * Sctypes.t) list Sym.Map.t
   -> function_args:(string * (string * Sctypes.t) list) list

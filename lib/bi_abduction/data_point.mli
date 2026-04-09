@@ -31,8 +31,14 @@ type heap_word =
     value : int64
   }
 
+(** Phase tag for heap snapshots.
+    - [Pre]  = H_entry: taken before body executes (at cn_abd_mark_post)
+    - [Post] = H_exit:  taken after body executes (at cn_abd_record_post_remaining) *)
+type dump_phase = Pre | Post
+
 type heap_dump =
   { function_name : string;
+    phase : dump_phase;
     target_addr : int64;
     words : heap_word list
   }
@@ -53,3 +59,6 @@ val missing_addr_set : missing_entry list -> Int64Set.t
 
 (** Build a lookup from heap dumps: given an address, return the 8-byte value if known. *)
 val heap_lookup : heap_dump list -> (int64 -> int64 option)
+
+(** Build a lookup from heap dumps filtered to the given phases. *)
+val heap_lookup_for_phases : dump_phase list -> heap_dump list -> (int64 -> int64 option)

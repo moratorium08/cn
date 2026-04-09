@@ -158,8 +158,11 @@ static void safe_read_handler(int sig) {
     siglongjmp(jmp_env, 1);
 }
 
-/* Dump heap neighborhood around an address to heap_output (JSONL) */
-static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
+/* Dump heap neighborhood around an address to heap_output (JSONL).
+   phase: "pre"  = H_entry snapshot (at cn_abd_mark_post, before body)
+          "post" = H_exit snapshot (at cn_abd_record_post_remaining, after body) */
+static void dump_heap_neighborhood(
+    const char *func_name, const char *phase, uintptr_t addr) {
   if (heap_output == NULL)
     return;
 
@@ -176,8 +179,9 @@ static void dump_heap_neighborhood(const char *func_name, uintptr_t addr) {
   sigaction(SIGSEGV, &sa_new, &sa_old_segv);
   sigaction(SIGBUS, &sa_new, &sa_old_bus);
 
-  fprintf(heap_output, "{\"function\":\"%s\",\"addr\":\"0x%" PRIxPTR "\",\"words\":{",
-      func_name, addr);
+  fprintf(heap_output,
+      "{\"function\":\"%s\",\"phase\":\"%s\",\"addr\":\"0x%" PRIxPTR "\",\"words\":{",
+      func_name, phase, addr);
 
   bool first = true;
   for (uintptr_t a = base; a <= end; a += 8) {
@@ -213,9 +217,6 @@ void cn_abd_record_missing(uintptr_t addr, size_t size) {
       return;
   }
   abd_record_addr_size(&current_frame->missing, addr, size);
-
-  /* Dump heap neighborhood immediately */
-  dump_heap_neighborhood(current_frame->function_name, addr);
 }
 
 void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
@@ -223,6 +224,9 @@ void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
     return;
 
   abd_record_addr_size(&current_frame->post_remaining, addr, size);
+
+  /* Dump H_exit heap neighborhood around the leaked address */
+  dump_heap_neighborhood(current_frame->function_name, "post", addr);
 }
 
 void cn_abd_record_var(
@@ -251,6 +255,17 @@ void cn_abd_mark_post(void) {
 
   /* Start fresh for post-state */
   abd_reset_missing_state(current_frame);
+
+  /* Dump H_entry: heap neighborhoods of all pointer-sized function arguments.
+     This captures the heap structure visible at function entry (before the body
+     executes), which is what pre-condition inference needs. */
+  for (int i = 0; i < current_frame->pre_var_count; i++) {
+    int64_t idx = i;
+    cn_abd_var_entry *entry = ht_get(current_frame->pre_vars, &idx);
+    if (entry != NULL && entry->size == 8 && entry->value != 0) {
+      dump_heap_neighborhood(current_frame->function_name, "pre", (uintptr_t)entry->value);
+    }
+  }
 }
 
 /* JSON output helpers */

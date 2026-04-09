@@ -36,8 +36,14 @@ type heap_word =
     value : int64
   }
 
+(** Phase tag for heap snapshots.
+    - [Pre]  = H_entry: taken at cn_abd_mark_post before body executes
+    - [Post] = H_exit:  taken at cn_abd_record_post_remaining after body *)
+type dump_phase = Pre | Post
+
 type heap_dump =
   { function_name : string;
+    phase : dump_phase;
     target_addr : int64;
     words : heap_word list
   }
@@ -149,9 +155,15 @@ let parse_heap_words_obj j =
       value = parse_hex_int64 (json_string val_j)
     })
 
+let parse_dump_phase j =
+  match StdList.assoc_opt "phase" (json_assoc j) with
+  | Some (`String "post") -> Post
+  | _                     -> Pre  (* "pre", missing, or legacy "body" → treated as Pre *)
+
 let parse_heap_dump_line (line : string) : heap_dump =
   let j = Yojson.Safe.from_string line in
   { function_name = json_string (json_field "function" j);
+    phase = parse_dump_phase j;
     target_addr = parse_hex_int64 (json_string (json_field "addr" j));
     words = parse_heap_words_obj (json_field "words" j)
   }
@@ -215,5 +227,19 @@ let heap_lookup (dumps : heap_dump list) : int64 -> int64 option =
        StdList.iter
          (fun w -> Hashtbl.replace tbl w.addr w.value)
          dump.words)
+    dumps;
+  fun addr -> Hashtbl.find_opt tbl addr
+
+(* Build a lookup function from heap dumps matching any of the given phases. *)
+let heap_lookup_for_phases (phases : dump_phase list) (dumps : heap_dump list)
+  : int64 -> int64 option
+  =
+  let tbl = Hashtbl.create 256 in
+  StdList.iter
+    (fun dump ->
+       if StdList.mem dump.phase phases then
+         StdList.iter
+           (fun w -> Hashtbl.replace tbl w.addr w.value)
+           dump.words)
     dumps;
   fun addr -> Hashtbl.find_opt tbl addr

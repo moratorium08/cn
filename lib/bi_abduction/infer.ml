@@ -104,7 +104,8 @@ let infer_function
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
-      ~(heap_lookup : int64 -> int64 option)
+      ~(pre_heap_lookup : int64 -> int64 option)
+      ~(post_heap_lookup : int64 -> int64 option)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -119,6 +120,7 @@ let infer_function
   (* Pick the data point with the most missing addresses as representative.
      For recursive functions, base cases (e.g., NULL) have empty missing sets,
      so we need the call with the richest data. *)
+  (* TODO (HK): Handle multiple data points at once *)
   let representative_dp =
     StdList.fold_left
       (fun best (dp : Data_point.data_point) ->
@@ -148,19 +150,35 @@ let infer_function
             ^^^ !^(Printf.sprintf "(%d bytes)" v.size))
          representative_dp.Data_point.pre_vars)
   end);
-  let graph = Memory_graph.build
-    ~dp:representative_dp
-    ~heap_lookup
+  let pre_missing_set = Data_point.missing_addr_set representative_dp.body_missing in
+  let post_remaining_set = Data_point.missing_addr_set representative_dp.post_remaining in
+  (* Build separate graphs for pre and post:
+     - pre_graph  uses H_entry heap snapshot and body_missing as the missing set
+     - post_graph uses H_exit  heap snapshot and post_remaining as the missing set *)
+  let pre_graph = Memory_graph.build
+    ~pre_vars:representative_dp.pre_vars
+    ~missing_set:pre_missing_set
+    ~heap_lookup:pre_heap_lookup
     ~struct_layouts
   in
-  let graph_nodes = Memory_graph.Int64Map.cardinal
-    (Memory_graph.info graph) in
-  let graph_anchors = Int64Set.cardinal (Memory_graph.anchors graph) in
-  let graph_missing = Int64Set.cardinal (Memory_graph.missing graph) in
+  let post_graph = Memory_graph.build
+    ~pre_vars:representative_dp.pre_vars
+    ~missing_set:post_remaining_set
+    ~heap_lookup:post_heap_lookup
+    ~struct_layouts
+  in
   Pp.debug 4 (lazy
-    (item "memory graph"
+    (item "pre memory graph"
        (!^(Printf.sprintf "%d nodes, %d anchors, %d missing"
-              graph_nodes graph_anchors graph_missing))));
+              (Memory_graph.Int64Map.cardinal (Memory_graph.info pre_graph))
+              (Int64Set.cardinal (Memory_graph.anchors pre_graph))
+              (Int64Set.cardinal (Memory_graph.missing pre_graph))))));
+  Pp.debug 4 (lazy
+    (item "post memory graph"
+       (!^(Printf.sprintf "%d nodes, %d anchors, %d missing"
+              (Memory_graph.Int64Map.cardinal (Memory_graph.info post_graph))
+              (Int64Set.cardinal (Memory_graph.anchors post_graph))
+              (Int64Set.cardinal (Memory_graph.missing post_graph))))));
   let signature_args =
     Option.value ~default:[] (StdList.assoc_opt func_name function_args)
   in
@@ -196,23 +214,34 @@ let infer_function
       (fun (v : Data_point.var_binding) -> (v.name, v.value))
       representative_dp.Data_point.pre_vars
   in
-  (* Enumerate candidate qualifiers *)
-  let candidates = Enumerator.enumerate
-    ~config ~args ~pred_defs ~struct_defs ~graph ~var_addrs ~loc
+  (* Enumerate candidate qualifiers separately for pre and post,
+     using their respective heap graphs. *)
+  let pre_candidates_raw = Enumerator.enumerate
+    ~config ~args ~pred_defs ~struct_defs ~graph:pre_graph ~var_addrs ~loc
+  in
+  let post_candidates_raw = Enumerator.enumerate
+    ~config ~args ~pred_defs ~struct_defs ~graph:post_graph ~var_addrs ~loc
   in
   Pp.debug 4 (lazy
-    (item "candidates" (Pp.int (StdList.length candidates) ^^^ !^"qualifiers")));
+    (item "pre candidates (raw)"
+       (Pp.int (StdList.length pre_candidates_raw) ^^^ !^"qualifiers")));
+  Pp.debug 4 (lazy
+    (item "post candidates (raw)"
+       (Pp.int (StdList.length post_candidates_raw) ^^^ !^"qualifiers")));
   StdList.iter (fun q ->
-    Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
-    candidates;
-  (* Compute footprints for pre-condition candidates *)
+    Pp.debug 5 (lazy (item "  pre candidate" (Qualifier.pp q))))
+    pre_candidates_raw;
+  StdList.iter (fun q ->
+    Pp.debug 5 (lazy (item "  post candidate" (Qualifier.pp q))))
+    post_candidates_raw;
+  (* Compute footprints for pre-condition candidates using pre_graph *)
   let pre_must = pre_must_cover_set dps in
   Pp.debug 3 (lazy
     (item "pre must-cover" (Pp.int (Int64Set.cardinal pre_must) ^^^ !^"bytes")));
   let pre_candidates =
     StdList.filter_map
       (fun q ->
-         match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
+         match Footprint.compute_with_graph q representative_dp pre_graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp pre_must)) ->
            let covers = Int64Set.cardinal (Int64Set.inter fp pre_must) in
            Pp.debug 5 (lazy
@@ -222,7 +251,7 @@ let infer_function
                  Pp.int covers ^^^ !^"covering must")));
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
-      candidates
+      pre_candidates_raw
   in
   Pp.debug 4 (lazy
     (item "pre candidates with footprints" (Pp.int (StdList.length pre_candidates))));
@@ -234,14 +263,14 @@ let infer_function
       (Pp.int n_sel ^^^ !^"selected," ^^^
        Pp.int n_uncov ^^^ !^"uncovered")
   end);
-  (* Compute footprints for post-condition candidates *)
+  (* Compute footprints for post-condition candidates using post_graph *)
   let post_must = post_must_cover_set dps in
   Pp.debug 3 (lazy
     (item "post must-cover" (Pp.int (Int64Set.cardinal post_must) ^^^ !^"bytes")));
   let post_candidates =
     StdList.filter_map
       (fun q ->
-         match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
+         match Footprint.compute_with_graph q representative_dp post_graph ~struct_layouts with
          | Some fp when not (Int64Set.is_empty (Int64Set.inter fp post_must)) ->
            let covers = Int64Set.cardinal (Int64Set.inter fp post_must) in
            Pp.debug 5 (lazy
@@ -251,7 +280,7 @@ let infer_function
                  Pp.int covers ^^^ !^"covering must")));
            Some { Cover.qualifier = q; footprint = fp }
          | _ -> None)
-      candidates
+      post_candidates_raw
   in
   Pp.debug 4 (lazy
     (item "post candidates with footprints" (Pp.int (StdList.length post_candidates))));
@@ -285,7 +314,7 @@ let infer_function
 let infer
       ~(config : Enumerator.config)
       ~(execution_data : Data_point.execution_data)
-      ~(heap_lookup : int64 -> int64 option)
+      ~(heap_dumps : Data_point.heap_dump list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
@@ -298,6 +327,15 @@ let infer
        (Pp.int (StdList.length execution_data.data_points) ^^^ !^"data points," ^^^
         Pp.int (Sym.Map.cardinal pred_defs) ^^^ !^"predicates," ^^^
         Pp.int (Sym.Map.cardinal struct_defs) ^^^ !^"struct types")));
+  (* Build phase-specific heap lookups:
+     pre  = Pre (H_entry: arg-neighborhood snapshots taken before body executes)
+     post = Post (H_exit: leaked-address snapshots taken after body executes) *)
+  let pre_heap_lookup =
+    Data_point.heap_lookup_for_phases [Pre] heap_dumps
+  in
+  let post_heap_lookup =
+    Data_point.heap_lookup_for_phases [Post] heap_dumps
+  in
   let grouped = Data_point.group_by_function execution_data.data_points in
   Pp.debug 2 (lazy
     (item "functions"
@@ -308,7 +346,7 @@ let infer
   StdList.map
     (fun (func_name, dps) ->
        infer_function ~config ~pred_defs ~struct_defs
-         ~function_args ~heap_lookup ~func_name ~dps)
+         ~function_args ~pre_heap_lookup ~post_heap_lookup ~func_name ~dps)
     grouped
 
 (** Pretty-print inferred specifications as CN annotation suggestions. *)
@@ -386,5 +424,4 @@ let infer_from_files
   Pp.debug 3 (lazy
     (Pp.item "heap dumps"
        (Pp.string (Printf.sprintf "%d entries" (StdList.length heap_dumps)))));
-  let heap_lookup = Data_point.heap_lookup heap_dumps in
-  infer ~config ~execution_data ~heap_lookup ~pred_defs ~struct_defs ~function_args
+  infer ~config ~execution_data ~heap_dumps ~pred_defs ~struct_defs ~function_args
