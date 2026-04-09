@@ -36,14 +36,8 @@ type heap_word =
     value : int64
   }
 
-(** Phase tag for heap snapshots.
-    - [Pre]  = H_entry: taken at cn_abd_mark_post before body executes
-    - [Post] = H_exit:  taken at cn_abd_record_post_remaining after body *)
-type dump_phase = Pre | Post
-
 type heap_dump =
   { function_name : string;
-    phase : dump_phase;
     target_addr : int64;
     words : heap_word list
   }
@@ -155,34 +149,41 @@ let parse_heap_words_obj j =
       value = parse_hex_int64 (json_string val_j)
     })
 
-let parse_dump_phase j =
-  match StdList.assoc_opt "phase" (json_assoc j) with
-  | Some (`String "post") -> Post
-  | _                     -> Pre  (* "pre", missing, or legacy "body" → treated as Pre *)
-
-let parse_heap_dump_line (line : string) : heap_dump =
+let parse_heap_dump_line (line : string) : [`Pre | `Post] * heap_dump =
   let j = Yojson.Safe.from_string line in
-  { function_name = json_string (json_field "function" j);
-    phase = parse_dump_phase j;
-    target_addr = parse_hex_int64 (json_string (json_field "addr" j));
-    words = parse_heap_words_obj (json_field "words" j)
-  }
+  let phase =
+    match StdList.assoc_opt "phase" (json_assoc j) with
+    | Some (`String "post") -> `Post
+    | _                     -> `Pre  (* "pre", missing, or legacy "body" → Pre *)
+  in
+  let dump =
+    { function_name = json_string (json_field "function" j);
+      target_addr = parse_hex_int64 (json_string (json_field "addr" j));
+      words = parse_heap_words_obj (json_field "words" j)
+    }
+  in
+  (phase, dump)
 
-let parse_heap_jsonl (filename : string) : heap_dump list =
+(** Parse a heap JSONL file and return (pre_dumps, post_dumps) split by phase. *)
+let parse_heap_jsonl (filename : string) : heap_dump list * heap_dump list =
   let ic = open_in filename in
-  let rec read_lines acc =
+  let rec read_lines pre post =
     match input_line ic with
     | line ->
       let line = String.trim line in
       if String.length line = 0 then
-        read_lines acc
-      else
-        read_lines (parse_heap_dump_line line :: acc)
+        read_lines pre post
+      else begin
+        let (phase, dump) = parse_heap_dump_line line in
+        match phase with
+        | `Pre  -> read_lines (dump :: pre) post
+        | `Post -> read_lines pre (dump :: post)
+      end
     | exception End_of_file ->
-      StdList.rev acc
+      (StdList.rev pre, StdList.rev post)
   in
   Fun.protect ~finally:(fun () -> close_in ic)
-    (fun () -> read_lines [])
+    (fun () -> read_lines [] [])
 
 (* --- Grouping --- *)
 
@@ -230,16 +231,3 @@ let heap_lookup (dumps : heap_dump list) : int64 -> int64 option =
     dumps;
   fun addr -> Hashtbl.find_opt tbl addr
 
-(* Build a lookup function from heap dumps matching any of the given phases. *)
-let heap_lookup_for_phases (phases : dump_phase list) (dumps : heap_dump list)
-  : int64 -> int64 option
-  =
-  let tbl = Hashtbl.create 256 in
-  StdList.iter
-    (fun dump ->
-       if StdList.mem dump.phase phases then
-         StdList.iter
-           (fun w -> Hashtbl.replace tbl w.addr w.value)
-           dump.words)
-    dumps;
-  fun addr -> Hashtbl.find_opt tbl addr

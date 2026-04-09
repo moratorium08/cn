@@ -314,7 +314,8 @@ let infer_function
 let infer
       ~(config : Enumerator.config)
       ~(execution_data : Data_point.execution_data)
-      ~(heap_dumps : Data_point.heap_dump list)
+      ~(pre_heap_lookup : int64 -> int64 option)
+      ~(post_heap_lookup : int64 -> int64 option)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
@@ -327,15 +328,6 @@ let infer
        (Pp.int (StdList.length execution_data.data_points) ^^^ !^"data points," ^^^
         Pp.int (Sym.Map.cardinal pred_defs) ^^^ !^"predicates," ^^^
         Pp.int (Sym.Map.cardinal struct_defs) ^^^ !^"struct types")));
-  (* Build phase-specific heap lookups:
-     pre  = Pre (H_entry: arg-neighborhood snapshots taken before body executes)
-     post = Post (H_exit: leaked-address snapshots taken after body executes) *)
-  let pre_heap_lookup =
-    Data_point.heap_lookup_for_phases [Pre] heap_dumps
-  in
-  let post_heap_lookup =
-    Data_point.heap_lookup_for_phases [Post] heap_dumps
-  in
   let grouped = Data_point.group_by_function execution_data.data_points in
   Pp.debug 2 (lazy
     (item "functions"
@@ -420,8 +412,12 @@ let infer_from_files
   Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
   let execution_data = Data_point.parse_summary_json summary_file in
   Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
-  let heap_dumps = Data_point.parse_heap_jsonl heap_file in
+  let (pre_dumps, post_dumps) = Data_point.parse_heap_jsonl heap_file in
   Pp.debug 3 (lazy
     (Pp.item "heap dumps"
-       (Pp.string (Printf.sprintf "%d entries" (StdList.length heap_dumps)))));
-  infer ~config ~execution_data ~heap_dumps ~pred_defs ~struct_defs ~function_args
+       (Pp.string (Printf.sprintf "pre:%d post:%d"
+          (StdList.length pre_dumps) (StdList.length post_dumps)))));
+  let pre_heap_lookup = Data_point.heap_lookup pre_dumps in
+  let post_heap_lookup = Data_point.heap_lookup post_dumps in
+  infer ~config ~execution_data ~pre_heap_lookup ~post_heap_lookup
+    ~pred_defs ~struct_defs ~function_args

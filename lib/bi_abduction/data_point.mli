@@ -31,14 +31,8 @@ type heap_word =
     value : int64
   }
 
-(** Phase tag for heap snapshots.
-    - [Pre]  = H_entry: taken before body executes (at cn_abd_mark_post)
-    - [Post] = H_exit:  taken after body executes (at cn_abd_record_post_remaining) *)
-type dump_phase = Pre | Post
-
 type heap_dump =
   { function_name : string;
-    phase : dump_phase;
     target_addr : int64;
     words : heap_word list
   }
@@ -46,8 +40,9 @@ type heap_dump =
 (** Parse a summary JSON file (.abd.json). *)
 val parse_summary_json : string -> execution_data
 
-(** Parse a heap dump JSONL file (.heap.jsonl). *)
-val parse_heap_jsonl : string -> heap_dump list
+(** Parse a heap dump JSONL file, split by phase.
+    Returns (pre_dumps, post_dumps) where pre = H_entry, post = H_exit. *)
+val parse_heap_jsonl : string -> heap_dump list * heap_dump list
 
 (** Group data points by function name. *)
 val group_by_function : data_point list -> (string * data_point list) list
@@ -59,6 +54,3 @@ val missing_addr_set : missing_entry list -> Int64Set.t
 
 (** Build a lookup from heap dumps: given an address, return the 8-byte value if known. *)
 val heap_lookup : heap_dump list -> (int64 -> int64 option)
-
-(** Build a lookup from heap dumps filtered to the given phases. *)
-val heap_lookup_for_phases : dump_phase list -> heap_dump list -> (int64 -> int64 option)
