@@ -190,6 +190,7 @@ let generate_bi_abd
                 ~with_loop_leak_checks:false
                 ~without_lemma_checks:false
                 ~exec_c_locs_mode:false
+                ~correct_missing_ownership_mode:false
                 ~experimental_ownership_stack_mode:false
                 ~experimental_curly_braces:false
                 ~with_testing:false
