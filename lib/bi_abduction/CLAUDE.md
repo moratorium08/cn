@@ -45,13 +45,17 @@ Entry points:
 
 **`cn_abd_summary.json`** — written once at exit:
 ```json
-{"version":1,"data_points":[{
+{"version":2,"data_points":[{
   "function":"f",
-  "pre":{"vars":[{"name":"p","value":"0x...","size":8,"type":"pointer"}],
-         "missing":[{"addr":"0x...","size":1}]},
-  "post":{"vars":[],"missing":[...]}
+  "pre":{"vars":[{"name":"p","value":"0x...","size":8,"type":"pointer"}]},
+  "body":{"missing":[{"addr":"0x...","size":1}]},
+  "post":{"remaining":[{"addr":"0x...","size":1}]}
 }]}
 ```
+Note: the callee's pre_missing (addresses its declared precondition could not
+claim) is not recorded in its own data point. Per IDEA.md's CALL/return rules,
+pre_missing is propagated to the caller's missing set at pop_frame time, so
+the caller's body_missing already reflects it transitively.
 
 **`cn_abd_heap.jsonl`** — one JSON object per line, written incrementally:
 ```json

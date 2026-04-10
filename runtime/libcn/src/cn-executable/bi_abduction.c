@@ -22,10 +22,13 @@ static bool abd_enabled = false;
 static cn_abd_frame *current_frame = NULL;
 static FILE *heap_output = NULL;
 
-/* Linked list of collected data points (lightweight, kept in memory) */
+/* Linked list of collected data points (lightweight, kept in memory).
+   Note: pre_missing is NOT stored here. Per IDEA.md's CALL/return rules, the
+   callee's pre_missing (addresses the declared precondition could not claim)
+   is propagated to the caller via merge at pop_frame time, not recorded in
+   the callee's own data point. */
 typedef struct abd_data_point {
   const char *function_name;
-  hash_table *pre_missing;
   hash_table *pre_vars;
   int pre_var_count;
   hash_table *body_missing;     /* body auto-grants = precondition needs */
@@ -84,7 +87,6 @@ static void abd_merge_missing(hash_table *dst, hash_table *src) {
 static void abd_append_data_point(cn_abd_frame *frame) {
   abd_data_point *dp = malloc(sizeof(abd_data_point));
   dp->function_name = frame->function_name;
-  dp->pre_missing = frame->pre_missing;
   dp->pre_vars = frame->pre_vars;
   dp->pre_var_count = frame->pre_var_count;
   dp->body_missing = frame->missing;        /* body auto-grants = precondition */
@@ -133,16 +135,16 @@ void cn_abd_pop_frame(void) {
 
   abd_append_data_point(frame);
 
-  /* Merge callee's missing addresses into parent's M (RETURN rule: M'' = M ∪ M')
-     Only body_missing (precondition needs) propagates to caller.
-     post_remaining (postcondition) is recorded in the data point but NOT merged. */
+  /* Propagate callee's missing to parent (IDEA.md return rule: M'' = M ∪ M').
+     Both pre_missing (what the callee's own precondition wanted but was not
+     in the caller's state) and body_missing (what the body accessed beyond
+     the precondition) flow back to the caller's missing set — the caller
+     must have provided both. post_remaining (leak check) is the callee's
+     postcondition obligation, NOT the caller's, so it is not merged. */
   cn_abd_frame *parent = frame->prev;
   if (parent != NULL) {
-    /* Merge pre_missing into parent */
     abd_merge_missing(parent->missing, frame->pre_missing);
-    /* Merge body_missing into parent (M'' = M ∪ M') */
     abd_merge_missing(parent->missing, frame->missing);
-    /* NOTE: post_remaining is NOT merged — it's f's postcondition, not caller's obligation */
   }
 
   current_frame = parent;
@@ -316,8 +318,6 @@ void cn_abd_dump_summary(FILE *out) {
 
     fprintf(out, "{\"function\":\"%s\",\"pre\":{\"vars\":", dp->function_name);
     dump_vars_json(out, dp->pre_vars, dp->pre_var_count);
-    fprintf(out, ",\"missing\":");
-    dump_missing_json(out, dp->pre_missing);
     fprintf(out, "},\"body\":{\"missing\":");
     dump_missing_json(out, dp->body_missing);
     fprintf(out, "},\"post\":{\"remaining\":");
