@@ -1,5 +1,7 @@
 # Bi-Abduction Inference Framework
 
+**Summarized by Claude**
+
 ## What this is
 
 OCaml inference framework for bi-abductive specification inference in CN/Fulminate.

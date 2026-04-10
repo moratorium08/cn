@@ -154,13 +154,9 @@ let infer_function
       | `Pre ->
         ("pre", pre_heap_lookup, fun (dp : Data_point.data_point) -> dp.body_missing)
       | `Post ->
-        ( "post",
-          post_heap_lookup,
-          fun (dp : Data_point.data_point) -> dp.post_remaining )
+        ("post", post_heap_lookup, fun (dp : Data_point.data_point) -> dp.post_remaining)
     in
-    let missing_set =
-      Data_point.missing_addr_set (select_missing representative_dp)
-    in
+    let missing_set = Data_point.missing_addr_set (select_missing representative_dp) in
     let graph =
       Memory_graph.build
         ~pre_vars:representative_dp.pre_vars
@@ -196,9 +192,7 @@ let infer_function
            (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
     StdList.iter
       (fun q ->
-         Pp.debug
-           5
-           (lazy (item ("  " ^ phase_label ^ " candidate") (Qualifier.pp q))))
+         Pp.debug 5 (lazy (item ("  " ^ phase_label ^ " candidate") (Qualifier.pp q))))
       candidates_raw;
     Pp.debug
       3

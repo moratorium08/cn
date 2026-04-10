@@ -17,6 +17,7 @@ type missing_entry =
     size : int
   }
 
+(* TODO(HK): Add a field for capturing `return` values *)
 type data_point =
   { function_name : string;
     pre_vars : var_binding list;

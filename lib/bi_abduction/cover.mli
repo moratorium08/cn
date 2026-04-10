@@ -16,10 +16,4 @@ type cover_result =
 
 val greedy_cover : must_cover:Int64Set.t -> candidates:candidate list -> cover_result
 
-val exact_cover
-  :  must_cover:Int64Set.t ->
-  candidates:candidate list ->
-  max_subset_size:int ->
-  cover_result
-
 val cover : must_cover:Int64Set.t -> candidates:candidate list -> cover_result

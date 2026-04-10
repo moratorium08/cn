@@ -163,6 +163,8 @@ let predicate_qualifiers
     ptr_terms
 
 
+(* HK(TODO): make this lazy *)
+
 (** Main enumeration entry point. *)
 let enumerate
       ~(config : config)
