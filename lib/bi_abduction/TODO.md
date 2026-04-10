@@ -106,9 +106,7 @@ Remaining gaps:
 - fallback inference still uses `v.size = 8 → Loc ()` when signature metadata is
   unavailable,
 - predicate iarg matching still only looks at coarse `BaseTypes.t`, not full C
-  types,
-- runtime JSON still records `"auto"` rather than the precise parameter type, so
-  the type information is not preserved independently of the frontend.
+  types.
 
 **Further work**: Thread precise C types more systematically through the runtime
 and inference pipeline, and use them for richer ranking/disambiguation.

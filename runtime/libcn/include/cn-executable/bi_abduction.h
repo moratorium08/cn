@@ -17,7 +17,6 @@ typedef struct cn_abd_var_entry {
   const char *name;
   __cerbty_uintptr_t value;
   __cerbty_size_t size;
-  const char *type_name;
 } cn_abd_var_entry;
 
 typedef struct cn_abd_frame {
@@ -38,7 +37,7 @@ void cn_abd_pop_frame(void);
 void cn_abd_record_missing(__cerbty_uintptr_t addr, __cerbty_size_t size);
 void cn_abd_record_post_remaining(__cerbty_uintptr_t addr, __cerbty_size_t size);
 void cn_abd_record_var(
-    const char *name, __cerbty_uintptr_t value, __cerbty_size_t size, const char *type_name);
+    const char *name, __cerbty_uintptr_t value, __cerbty_size_t size);
 void cn_abd_mark_post(void);
 void cn_abd_dump_summary(void *out);
 
@@ -61,7 +60,6 @@ typedef struct cn_abd_var_entry {
   const char *name;
   uintptr_t value;
   size_t size;
-  const char *type_name;
 } cn_abd_var_entry;
 
 typedef struct cn_abd_frame {
@@ -83,7 +81,7 @@ void cn_abd_pop_frame(void);
 void cn_abd_record_missing(uintptr_t addr, size_t size);
 void cn_abd_record_post_remaining(uintptr_t addr, size_t size);
 void cn_abd_record_var(
-    const char *name, uintptr_t value, size_t size, const char *type_name);
+    const char *name, uintptr_t value, size_t size);
 void cn_abd_mark_post(void);
 void cn_abd_dump_summary(FILE *out);
 

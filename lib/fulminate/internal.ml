@@ -282,7 +282,7 @@ let generate_c_specs_internal
         List.map (fun param_sym ->
           let name = Sym.pp_string param_sym in
           Printf.sprintf
-            "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s), \"auto\");\n"
+            "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s));\n"
             name name name)
           param_syms
       | None -> []

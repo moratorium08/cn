@@ -232,7 +232,7 @@ void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
 }
 
 void cn_abd_record_var(
-    const char *name, uintptr_t value, size_t size, const char *type_name) {
+    const char *name, uintptr_t value, size_t size) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
@@ -240,7 +240,6 @@ void cn_abd_record_var(
   entry->name = name;
   entry->value = value;
   entry->size = size;
-  entry->type_name = type_name;
 
   int64_t *heap_idx = malloc(sizeof(int64_t));
   *heap_idx = current_frame->pre_var_count;
@@ -281,8 +280,8 @@ static void dump_vars_json(FILE *out, hash_table *vars, int count) {
       continue;
     if (i > 0)
       fprintf(out, ",");
-    fprintf(out, "{\"name\":\"%s\",\"value\":\"0x%" PRIxPTR "\",\"size\":%zu,\"type\":\"%s\"}",
-        entry->name, entry->value, entry->size, entry->type_name);
+    fprintf(out, "{\"name\":\"%s\",\"value\":\"0x%" PRIxPTR "\",\"size\":%zu}",
+        entry->name, entry->value, entry->size);
   }
   fprintf(out, "]");
 }

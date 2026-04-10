@@ -4,8 +4,7 @@
 type var_binding =
   { name : string;
     value : int64;
-    size : int;
-    type_name : string
+    size : int
   }
 
 type missing_entry =

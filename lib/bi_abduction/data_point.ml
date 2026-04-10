@@ -9,8 +9,7 @@ module String = Stdlib.String
 type var_binding =
   { name : string;
     value : int64;
-    size : int;
-    type_name : string
+    size : int
   }
 
 type missing_entry =
@@ -77,8 +76,7 @@ let json_field key obj =
 let parse_var_binding j =
   { name = json_string (json_field "name" j);
     value = parse_hex_int64 (json_string (json_field "value" j));
-    size = json_int (json_field "size" j);
-    type_name = json_string (json_field "type" j)
+    size = json_int (json_field "size" j)
   }
 
 (* --- Missing entry parsing --- *)

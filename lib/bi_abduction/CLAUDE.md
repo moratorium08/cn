@@ -47,7 +47,7 @@ Entry points:
 ```json
 {"version":2,"data_points":[{
   "function":"f",
-  "pre":{"vars":[{"name":"p","value":"0x...","size":8,"type":"pointer"}]},
+  "pre":{"vars":[{"name":"p","value":"0x...","size":8}]},
   "body":{"missing":[{"addr":"0x...","size":1}]},
   "post":{"remaining":[{"addr":"0x...","size":1}]}
 }]}
