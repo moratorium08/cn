@@ -20,8 +20,7 @@ type data_point =
   }
 
 type execution_data =
-  { version : int;
-    data_points : data_point list
+  { data_points : data_point list
   }
 
 type heap_word =

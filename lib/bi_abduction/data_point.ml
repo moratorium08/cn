@@ -25,8 +25,7 @@ type data_point =
   }
 
 type execution_data =
-  { version : int;
-    data_points : data_point list
+  { data_points : data_point list
   }
 
 type heap_word =
@@ -111,9 +110,7 @@ let parse_data_point j =
 
 let parse_summary_json (filename : string) : execution_data =
   let json = Yojson.Safe.from_file filename in
-  let version = json_int (json_field "version" json) in
-  { version;
-    data_points =
+  { data_points =
       json_list (json_field "data_points" json)
       |> StdList.map parse_data_point
   }

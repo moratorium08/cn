@@ -307,7 +307,7 @@ void cn_abd_dump_summary(FILE *out) {
   if (!abd_enabled || out == NULL)
     return;
 
-  fprintf(out, "{\"version\":2,\"data_points\":[");
+  fprintf(out, "{\"data_points\":[");
 
   abd_data_point *dp = data_points_head;
   bool first = true;

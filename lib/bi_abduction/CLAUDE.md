@@ -45,7 +45,7 @@ Entry points:
 
 **`cn_abd_summary.json`** — written once at exit:
 ```json
-{"version":2,"data_points":[{
+{"data_points":[{
   "function":"f",
   "pre":{"vars":[{"name":"p","value":"0x...","size":8}]},
   "body":{"missing":[{"addr":"0x...","size":1}]},
