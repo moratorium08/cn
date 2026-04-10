@@ -214,84 +214,57 @@ let infer_function
       (fun (v : Data_point.var_binding) -> (v.name, v.value))
       representative_dp.Data_point.pre_vars
   in
-  (* Enumerate candidate qualifiers separately for pre and post,
-     using their respective heap graphs. *)
-  let pre_candidates_raw = Enumerator.enumerate
-    ~config ~args ~pred_defs ~graph:pre_graph ~var_addrs ~loc
+  (* Enumerate, score and cover qualifiers for one phase (pre or post).
+     pre and post differ only in which heap graph and must-cover set they use. *)
+  let cover_phase ~(phase : string) ~(graph : Memory_graph.t) ~(must_cover : Int64Set.t)
+    : Cover.cover_result
+    =
+    let candidates_raw =
+      Enumerator.enumerate ~config ~args ~pred_defs ~graph ~var_addrs ~loc
+    in
+    Pp.debug 4 (lazy
+      (item (phase ^ " candidates (raw)")
+         (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
+    StdList.iter
+      (fun q -> Pp.debug 5 (lazy (item ("  " ^ phase ^ " candidate") (Qualifier.pp q))))
+      candidates_raw;
+    Pp.debug 3 (lazy
+      (item (phase ^ " must-cover")
+         (Pp.int (Int64Set.cardinal must_cover) ^^^ !^"bytes")));
+    let candidates =
+      StdList.filter_map
+        (fun q ->
+           match Footprint.compute_with_graph q representative_dp graph ~struct_layouts with
+           | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
+             let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
+             Pp.debug 5 (lazy
+               (item ("  " ^ phase ^ " footprint")
+                  (Qualifier.pp q ^^^ !^"->" ^^^
+                   Pp.int (Int64Set.cardinal fp) ^^^ !^"bytes," ^^^
+                   Pp.int covers ^^^ !^"covering must")));
+             Some { Cover.qualifier = q; footprint = fp }
+           | _ -> None)
+        candidates_raw
+    in
+    Pp.debug 4 (lazy
+      (item (phase ^ " candidates with footprints")
+         (Pp.int (StdList.length candidates))));
+    let result = Cover.cover ~must_cover ~candidates in
+    Pp.debug 3 (lazy begin
+      let n_sel = StdList.length result.selected in
+      let n_uncov = Int64Set.cardinal result.uncovered in
+      item (phase ^ " cover result")
+        (Pp.int n_sel ^^^ !^"selected," ^^^
+         Pp.int n_uncov ^^^ !^"uncovered")
+    end);
+    result
   in
-  let post_candidates_raw = Enumerator.enumerate
-    ~config ~args ~pred_defs ~graph:post_graph ~var_addrs ~loc
+  let pre_result =
+    cover_phase ~phase:"pre" ~graph:pre_graph ~must_cover:(pre_must_cover_set dps)
   in
-  Pp.debug 4 (lazy
-    (item "pre candidates (raw)"
-       (Pp.int (StdList.length pre_candidates_raw) ^^^ !^"qualifiers")));
-  Pp.debug 4 (lazy
-    (item "post candidates (raw)"
-       (Pp.int (StdList.length post_candidates_raw) ^^^ !^"qualifiers")));
-  StdList.iter (fun q ->
-    Pp.debug 5 (lazy (item "  pre candidate" (Qualifier.pp q))))
-    pre_candidates_raw;
-  StdList.iter (fun q ->
-    Pp.debug 5 (lazy (item "  post candidate" (Qualifier.pp q))))
-    post_candidates_raw;
-  (* Compute footprints for pre-condition candidates using pre_graph *)
-  let pre_must = pre_must_cover_set dps in
-  Pp.debug 3 (lazy
-    (item "pre must-cover" (Pp.int (Int64Set.cardinal pre_must) ^^^ !^"bytes")));
-  let pre_candidates =
-    StdList.filter_map
-      (fun q ->
-         match Footprint.compute_with_graph q representative_dp pre_graph ~struct_layouts with
-         | Some fp when not (Int64Set.is_empty (Int64Set.inter fp pre_must)) ->
-           let covers = Int64Set.cardinal (Int64Set.inter fp pre_must) in
-           Pp.debug 5 (lazy
-             (item "  pre footprint"
-                (Qualifier.pp q ^^^ !^"->" ^^^
-                 Pp.int (Int64Set.cardinal fp) ^^^ !^"bytes," ^^^
-                 Pp.int covers ^^^ !^"covering must")));
-           Some { Cover.qualifier = q; footprint = fp }
-         | _ -> None)
-      pre_candidates_raw
+  let post_result =
+    cover_phase ~phase:"post" ~graph:post_graph ~must_cover:(post_must_cover_set dps)
   in
-  Pp.debug 4 (lazy
-    (item "pre candidates with footprints" (Pp.int (StdList.length pre_candidates))));
-  let pre_result = Cover.cover ~must_cover:pre_must ~candidates:pre_candidates in
-  Pp.debug 3 (lazy begin
-    let n_sel = StdList.length pre_result.selected in
-    let n_uncov = Int64Set.cardinal pre_result.uncovered in
-    item "pre cover result"
-      (Pp.int n_sel ^^^ !^"selected," ^^^
-       Pp.int n_uncov ^^^ !^"uncovered")
-  end);
-  (* Compute footprints for post-condition candidates using post_graph *)
-  let post_must = post_must_cover_set dps in
-  Pp.debug 3 (lazy
-    (item "post must-cover" (Pp.int (Int64Set.cardinal post_must) ^^^ !^"bytes")));
-  let post_candidates =
-    StdList.filter_map
-      (fun q ->
-         match Footprint.compute_with_graph q representative_dp post_graph ~struct_layouts with
-         | Some fp when not (Int64Set.is_empty (Int64Set.inter fp post_must)) ->
-           let covers = Int64Set.cardinal (Int64Set.inter fp post_must) in
-           Pp.debug 5 (lazy
-             (item "  post footprint"
-                (Qualifier.pp q ^^^ !^"->" ^^^
-                 Pp.int (Int64Set.cardinal fp) ^^^ !^"bytes," ^^^
-                 Pp.int covers ^^^ !^"covering must")));
-           Some { Cover.qualifier = q; footprint = fp }
-         | _ -> None)
-      post_candidates_raw
-  in
-  Pp.debug 4 (lazy
-    (item "post candidates with footprints" (Pp.int (StdList.length post_candidates))));
-  let post_result = Cover.cover ~must_cover:post_must ~candidates:post_candidates in
-  Pp.debug 3 (lazy begin
-    let n_sel = StdList.length post_result.selected in
-    let n_uncov = Int64Set.cardinal post_result.uncovered in
-    item "post cover result"
-      (Pp.int n_sel ^^^ !^"selected," ^^^
-       Pp.int n_uncov ^^^ !^"uncovered")
-  end);
   (* Analyse which variables' memory ranges are missing *)
   let pre_analysis =
     analyse_missing_vars representative_dp.Data_point.pre_vars
