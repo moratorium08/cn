@@ -13,16 +13,15 @@
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
 
-type inference_result =
-  | Success of
-      { pre_qualifiers : Qualifier.t list;
-        post_qualifiers : Qualifier.t list
-      }
-  | Failed
+type inferred_qualifiers =
+  { pre : Qualifier.t list;
+    post : Qualifier.t list
+  }
 
 type inferred_spec =
   { function_name : string;
-    result : inference_result
+    qualifiers : inferred_qualifiers option
+        (** [None] when cover failed. *)
   }
 
 (** Build struct layouts from struct definitions.
@@ -235,18 +234,15 @@ let infer_function
   let post_result =
     cover_phase ~phase:"post" ~graph:post_graph ~must_cover:(post_must_cover_set dps)
   in
-  let result =
+  let qualifiers =
     if Int64Set.is_empty pre_result.uncovered
        && Int64Set.is_empty post_result.uncovered
     then
-      Success
-        { pre_qualifiers = pre_result.selected;
-          post_qualifiers = post_result.selected
-        }
+      Some { pre = pre_result.selected; post = post_result.selected }
     else
-      Failed
+      None
   in
-  { function_name = func_name; result }
+  { function_name = func_name; qualifiers }
 
 (** Main entry point: run inference on execution data. *)
 let infer
@@ -297,15 +293,15 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
        let header =
          string (Printf.sprintf "/* Function: %s */" spec.function_name) ^^ hardline
        in
-       match spec.result with
-       | Failed ->
+       match spec.qualifiers with
+       | None ->
          header ^^ string "  /* inference failed */"
-       | Success { pre_qualifiers; post_qualifiers } ->
-         let pre_doc = pp_qualifiers "precondition" pre_qualifiers in
+       | Some { pre; post } ->
+         let pre_doc = pp_qualifiers "precondition" pre in
          let post_doc =
-           match post_qualifiers with
+           match post with
            | [] -> Pp.empty
-           | _ -> hardline ^^ pp_qualifiers "postcondition" post_qualifiers
+           | _ -> hardline ^^ pp_qualifiers "postcondition" post
          in
          header ^^ pre_doc ^^ post_doc)
     specs

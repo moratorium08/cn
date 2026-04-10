@@ -1,15 +1,14 @@
 (** Top-level inference orchestrator. *)
 
-type inference_result =
-  | Success of
-      { pre_qualifiers : Qualifier.t list;
-        post_qualifiers : Qualifier.t list
-      }
-  | Failed
+type inferred_qualifiers =
+  { pre : Qualifier.t list;
+    post : Qualifier.t list
+  }
 
 type inferred_spec =
   { function_name : string;
-    result : inference_result
+    qualifiers : inferred_qualifiers option
+        (** [None] when cover failed. *)
   }
 
 val infer
