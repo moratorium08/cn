@@ -1,21 +1,15 @@
 (** Top-level inference orchestrator. *)
 
-module Int64Set = Data_point.Int64Set
-
-type address_analysis =
-  { var_name : string;
-    var_addr : int64;
-    missing_range : int
-  }
+type inference_result =
+  | Success of
+      { pre_qualifiers : Qualifier.t list;
+        post_qualifiers : Qualifier.t list
+      }
+  | Failed
 
 type inferred_spec =
   { function_name : string;
-    pre_qualifiers : Qualifier.t list;
-    post_qualifiers : Qualifier.t list;
-    pre_uncovered : Int64Set.t;
-    post_uncovered : Int64Set.t;
-    pre_analysis : address_analysis list;
-    post_analysis : address_analysis list
+    result : inference_result
   }
 
 val infer

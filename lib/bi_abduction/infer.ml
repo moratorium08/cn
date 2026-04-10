@@ -13,47 +13,17 @@
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
 
-type address_analysis =
-  { var_name : string;
-    var_addr : int64;
-    missing_range : int  (* number of contiguous missing bytes from var_addr *)
-  }
+type inference_result =
+  | Success of
+      { pre_qualifiers : Qualifier.t list;
+        post_qualifiers : Qualifier.t list
+      }
+  | Failed
 
 type inferred_spec =
   { function_name : string;
-    pre_qualifiers : Qualifier.t list;
-    post_qualifiers : Qualifier.t list;
-    pre_uncovered : Int64Set.t;
-    post_uncovered : Int64Set.t;
-    pre_analysis : address_analysis list;
-    post_analysis : address_analysis list
+    result : inference_result
   }
-
-(** Analyse which variable addresses overlap with missing address sets.
-    For each variable, count missing bytes within a reasonable range
-    of the variable's address (up to 4096 bytes forward, covering typical
-    struct sizes and linked structures). *)
-let analyse_missing_vars
-      (vars : Data_point.var_binding list)
-      (missing : Data_point.missing_entry list)
-  : address_analysis list
-  =
-  let missing_addrs = Data_point.missing_addr_set missing in
-  let max_range = 4096 in
-  StdList.filter_map
-    (fun (v : Data_point.var_binding) ->
-       (* Count missing bytes in [v.value, v.value + max_range) *)
-       let count = ref 0 in
-       for offset = 0 to max_range - 1 do
-         let addr = Int64.add v.value (Int64.of_int offset) in
-         if Int64Set.mem addr missing_addrs then
-           count := !count + 1
-       done;
-       if !count > 0 then
-         Some { var_name = v.name; var_addr = v.value; missing_range = !count }
-       else
-         None)
-    vars
 
 (** Build struct layouts from struct definitions.
     Maps struct tag → list of (field_id, byte_offset, byte_size). *)
@@ -265,23 +235,18 @@ let infer_function
   let post_result =
     cover_phase ~phase:"post" ~graph:post_graph ~must_cover:(post_must_cover_set dps)
   in
-  (* Analyse which variables' memory ranges are missing *)
-  let pre_analysis =
-    analyse_missing_vars representative_dp.Data_point.pre_vars
-      representative_dp.body_missing
+  let result =
+    if Int64Set.is_empty pre_result.uncovered
+       && Int64Set.is_empty post_result.uncovered
+    then
+      Success
+        { pre_qualifiers = pre_result.selected;
+          post_qualifiers = post_result.selected
+        }
+    else
+      Failed
   in
-  let post_analysis =
-    analyse_missing_vars representative_dp.pre_vars
-      representative_dp.post_remaining
-  in
-  { function_name = func_name;
-    pre_qualifiers = pre_result.selected;
-    post_qualifiers = post_result.selected;
-    pre_uncovered = pre_result.uncovered;
-    post_uncovered = post_result.uncovered;
-    pre_analysis;
-    post_analysis
-  }
+  { function_name = func_name; result }
 
 (** Main entry point: run inference on execution data. *)
 let infer
@@ -317,58 +282,32 @@ let infer
 (** Pretty-print inferred specifications as CN annotation suggestions. *)
 let pp_suggestions (specs : inferred_spec list) : Pp.document =
   let open Pp in
+  let pp_qualifiers label qs =
+    match qs with
+    | [] -> Pp.empty
+    | _ ->
+      string (Printf.sprintf "  /* Suggested %s additions: */" label) ^^ hardline ^^
+      separate hardline
+        (StdList.map
+           (fun q -> string "  take _ = " ^^ Qualifier.pp q ^^ semi)
+           qs)
+  in
   StdList.map
     (fun spec ->
-       let pre_doc =
-         match spec.pre_qualifiers with
-         | [] -> Pp.empty
-         | _ ->
-           string "  /* Suggested precondition additions: */" ^^ hardline ^^
-           separate hardline
-             (StdList.map
-                (fun q -> string "  take _ = " ^^ Qualifier.pp q ^^ semi)
-                spec.pre_qualifiers)
+       let header =
+         string (Printf.sprintf "/* Function: %s */" spec.function_name) ^^ hardline
        in
-       let post_doc =
-         match spec.post_qualifiers with
-         | [] -> Pp.empty
-         | _ ->
-           hardline ^^
-           string "  /* Suggested postcondition additions: */" ^^ hardline ^^
-           separate hardline
-             (StdList.map
-                (fun q -> string "  take _ = " ^^ Qualifier.pp q ^^ semi)
-                spec.post_qualifiers)
-       in
-       let analysis_doc label analyses =
-         match analyses with
-         | [] -> Pp.empty
-         | _ ->
-           hardline ^^
-           string (Printf.sprintf "  /* %s address analysis: */" label) ^^ hardline ^^
-           separate hardline
-             (StdList.map
-                (fun (a : address_analysis) ->
-                   string (Printf.sprintf
-                     "  /*   %s (0x%Lx): %d bytes missing -> likely needs Owned<_>(%s) */"
-                     a.var_name a.var_addr a.missing_range a.var_name))
-                analyses)
-       in
-       let uncov_doc =
-         let pre_n = Int64Set.cardinal spec.pre_uncovered in
-         let post_n = Int64Set.cardinal spec.post_uncovered in
-         if pre_n = 0 && post_n = 0 then Pp.empty
-         else
-           hardline ^^
-           string (Printf.sprintf
-             "  /* Warning: %d pre-addresses and %d post-addresses remain uncovered */"
-             pre_n post_n)
-       in
-       string (Printf.sprintf "/* Function: %s */" spec.function_name) ^^
-       hardline ^^ pre_doc ^^ post_doc ^^
-       analysis_doc "Pre" spec.pre_analysis ^^
-       analysis_doc "Post" spec.post_analysis ^^
-       uncov_doc)
+       match spec.result with
+       | Failed ->
+         header ^^ string "  /* inference failed */"
+       | Success { pre_qualifiers; post_qualifiers } ->
+         let pre_doc = pp_qualifiers "precondition" pre_qualifiers in
+         let post_doc =
+           match post_qualifiers with
+           | [] -> Pp.empty
+           | _ -> hardline ^^ pp_qualifiers "postcondition" post_qualifiers
+         in
+         header ^^ pre_doc ^^ post_doc)
     specs
   |> separate (hardline ^^ hardline)
 

@@ -50,7 +50,7 @@ expectations_for() {
     baseline_multi_call_list.c)
       printf '%s\n' \
         '/* Function: list_length */' \
-        'Warning: 32 pre-addresses and 32 post-addresses remain uncovered'
+        '/* inference failed */'
       ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
