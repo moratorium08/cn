@@ -53,26 +53,6 @@ let build_struct_layouts (struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
     struct_defs
 
 
-(** Compute the pre-condition must-cover set: union of body_missing
-    (body auto-grants = precondition needs) across all data points. *)
-let pre_must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
-  StdList.fold_left
-    (fun acc (dp : Data_point.data_point) ->
-       Int64Set.union acc (Data_point.missing_addr_set dp.body_missing))
-    Int64Set.empty
-    dps
-
-
-(** Compute the post-condition must-cover set: union of post_remaining
-    (leak check remainder = postcondition) across all data points. *)
-let post_must_cover_set (dps : Data_point.data_point list) : Int64Set.t =
-  StdList.fold_left
-    (fun acc (dp : Data_point.data_point) ->
-       Int64Set.union acc (Data_point.missing_addr_set dp.post_remaining))
-    Int64Set.empty
-    dps
-
-
 (** Run the inference pipeline for one function. *)
 let infer_function
       ~(config : Enumerator.config)
@@ -133,45 +113,6 @@ let infer_function
                ^^^ !^(Printf.sprintf "0x%Lx" v.value)
                ^^^ !^(Printf.sprintf "(%d bytes)" v.size))
             representative_dp.Data_point.pre_vars)));
-  let pre_missing_set = Data_point.missing_addr_set representative_dp.body_missing in
-  let post_remaining_set = Data_point.missing_addr_set representative_dp.post_remaining in
-  (* Build separate graphs for pre and post:
-     - pre_graph  uses H_entry heap snapshot and body_missing as the missing set
-     - post_graph uses H_exit  heap snapshot and post_remaining as the missing set *)
-  let pre_graph =
-    Memory_graph.build
-      ~pre_vars:representative_dp.pre_vars
-      ~missing_set:pre_missing_set
-      ~heap_lookup:pre_heap_lookup
-      ~struct_layouts
-  in
-  let post_graph =
-    Memory_graph.build
-      ~pre_vars:representative_dp.pre_vars
-      ~missing_set:post_remaining_set
-      ~heap_lookup:post_heap_lookup
-      ~struct_layouts
-  in
-  Pp.debug
-    4
-    (lazy
-      (item
-         "pre memory graph"
-         !^(Printf.sprintf
-              "%d nodes, %d anchors, %d missing"
-              (Memory_graph.Int64Map.cardinal (Memory_graph.info pre_graph))
-              (Int64Set.cardinal (Memory_graph.anchors pre_graph))
-              (Int64Set.cardinal (Memory_graph.missing pre_graph)))));
-  Pp.debug
-    4
-    (lazy
-      (item
-         "post memory graph"
-         !^(Printf.sprintf
-              "%d nodes, %d anchors, %d missing"
-              (Memory_graph.Int64Map.cardinal (Memory_graph.info post_graph))
-              (Int64Set.cardinal (Memory_graph.anchors post_graph))
-              (Int64Set.cardinal (Memory_graph.missing post_graph)))));
   let signature_args =
     Option.value ~default:[] (StdList.assoc_opt func_name function_args)
   in
@@ -203,11 +144,47 @@ let infer_function
       (fun (v : Data_point.var_binding) -> (v.name, v.value))
       representative_dp.Data_point.pre_vars
   in
-  (* Enumerate, score and cover qualifiers for one phase (pre or post).
-     pre and post differ only in which heap graph and must-cover set they use. *)
-  let cover_phase ~(phase : string) ~(graph : Memory_graph.t) ~(must_cover : Int64Set.t)
-    : Cover.cover_result
-    =
+  (* Run the pipeline for a single phase. pre and post differ only in which
+     heap snapshot, missing-entry field, and phase label they use:
+     - Pre:  H_entry snapshot, body_missing    (body auto-grants = pre needs)
+     - Post: H_exit  snapshot, post_remaining  (leak check remainder = post) *)
+  let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
+    let phase_label, heap_lookup, select_missing =
+      match phase with
+      | `Pre ->
+        ("pre", pre_heap_lookup, fun (dp : Data_point.data_point) -> dp.body_missing)
+      | `Post ->
+        ( "post",
+          post_heap_lookup,
+          fun (dp : Data_point.data_point) -> dp.post_remaining )
+    in
+    let missing_set =
+      Data_point.missing_addr_set (select_missing representative_dp)
+    in
+    let graph =
+      Memory_graph.build
+        ~pre_vars:representative_dp.pre_vars
+        ~missing_set
+        ~heap_lookup
+        ~struct_layouts
+    in
+    Pp.debug
+      4
+      (lazy
+        (item
+           (phase_label ^ " memory graph")
+           !^(Printf.sprintf
+                "%d nodes, %d anchors, %d missing"
+                (Memory_graph.Int64Map.cardinal (Memory_graph.info graph))
+                (Int64Set.cardinal (Memory_graph.anchors graph))
+                (Int64Set.cardinal (Memory_graph.missing graph)))));
+    let must_cover =
+      StdList.fold_left
+        (fun acc dp ->
+           Int64Set.union acc (Data_point.missing_addr_set (select_missing dp)))
+        Int64Set.empty
+        dps
+    in
     let candidates_raw =
       Enumerator.enumerate ~config ~args ~pred_defs ~graph ~var_addrs ~loc
     in
@@ -215,16 +192,19 @@ let infer_function
       4
       (lazy
         (item
-           (phase ^ " candidates (raw)")
+           (phase_label ^ " candidates (raw)")
            (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
     StdList.iter
-      (fun q -> Pp.debug 5 (lazy (item ("  " ^ phase ^ " candidate") (Qualifier.pp q))))
+      (fun q ->
+         Pp.debug
+           5
+           (lazy (item ("  " ^ phase_label ^ " candidate") (Qualifier.pp q))))
       candidates_raw;
     Pp.debug
       3
       (lazy
         (item
-           (phase ^ " must-cover")
+           (phase_label ^ " must-cover")
            (Pp.int (Int64Set.cardinal must_cover) ^^^ !^"bytes")));
     let candidates =
       StdList.filter_map
@@ -238,7 +218,7 @@ let infer_function
                5
                (lazy
                  (item
-                    ("  " ^ phase ^ " footprint")
+                    ("  " ^ phase_label ^ " footprint")
                     (Qualifier.pp q
                      ^^^ !^"->"
                      ^^^ Pp.int (Int64Set.cardinal fp)
@@ -253,7 +233,7 @@ let infer_function
       4
       (lazy
         (item
-           (phase ^ " candidates with footprints")
+           (phase_label ^ " candidates with footprints")
            (Pp.int (StdList.length candidates))));
     let result = Cover.cover ~must_cover ~candidates in
     Pp.debug
@@ -262,16 +242,12 @@ let infer_function
         (let n_sel = StdList.length result.selected in
          let n_uncov = Int64Set.cardinal result.uncovered in
          item
-           (phase ^ " cover result")
+           (phase_label ^ " cover result")
            (Pp.int n_sel ^^^ !^"selected," ^^^ Pp.int n_uncov ^^^ !^"uncovered")));
     result
   in
-  let pre_result =
-    cover_phase ~phase:"pre" ~graph:pre_graph ~must_cover:(pre_must_cover_set dps)
-  in
-  let post_result =
-    cover_phase ~phase:"post" ~graph:post_graph ~must_cover:(post_must_cover_set dps)
-  in
+  let pre_result = infer_function_inner `Pre in
+  let post_result = infer_function_inner `Post in
   let qualifiers =
     if Int64Set.is_empty pre_result.uncovered && Int64Set.is_empty post_result.uncovered
     then
