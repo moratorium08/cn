@@ -163,8 +163,7 @@ static void safe_read_handler(int sig) {
 /* Dump heap neighborhood around an address to heap_output (JSONL).
    phase: "pre"  = H_entry snapshot (at cn_abd_mark_post, before body)
           "post" = H_exit snapshot (at cn_abd_record_post_remaining, after body) */
-static void dump_heap_neighborhood(
-    const char *func_name, const char *phase, uintptr_t addr) {
+static void dump_heap_neighborhood(const char *phase, uintptr_t addr) {
   if (heap_output == NULL)
     return;
 
@@ -181,9 +180,7 @@ static void dump_heap_neighborhood(
   sigaction(SIGSEGV, &sa_new, &sa_old_segv);
   sigaction(SIGBUS, &sa_new, &sa_old_bus);
 
-  fprintf(heap_output,
-      "{\"function\":\"%s\",\"phase\":\"%s\",\"addr\":\"0x%" PRIxPTR "\",\"words\":{",
-      func_name, phase, addr);
+  fprintf(heap_output, "{\"phase\":\"%s\",\"words\":{", phase);
 
   bool first = true;
   for (uintptr_t a = base; a <= end; a += 8) {
@@ -228,7 +225,7 @@ void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
   abd_record_addr_size(&current_frame->post_remaining, addr, size);
 
   /* Dump H_exit heap neighborhood around the leaked address */
-  dump_heap_neighborhood(current_frame->function_name, "post", addr);
+  dump_heap_neighborhood("post", addr);
 }
 
 void cn_abd_record_var(
@@ -264,7 +261,7 @@ void cn_abd_mark_post(void) {
     int64_t idx = i;
     cn_abd_var_entry *entry = ht_get(current_frame->pre_vars, &idx);
     if (entry != NULL && entry->size == 8 && entry->value != 0) {
-      dump_heap_neighborhood(current_frame->function_name, "pre", (uintptr_t)entry->value);
+      dump_heap_neighborhood("pre", (uintptr_t)entry->value);
     }
   }
 }

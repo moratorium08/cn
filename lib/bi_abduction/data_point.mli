@@ -15,24 +15,18 @@ type missing_entry =
 type data_point =
   { function_name : string;
     pre_vars : var_binding list;
-    body_missing : missing_entry list;    (** body auto-grants = precondition needs *)
-    post_remaining : missing_entry list   (** leak check remainder = postcondition *)
+    body_missing : missing_entry list; (** body auto-grants = precondition needs *)
+    post_remaining : missing_entry list (** leak check remainder = postcondition *)
   }
 
-type execution_data =
-  { data_points : data_point list
-  }
+type execution_data = { data_points : data_point list }
 
 type heap_word =
   { addr : int64;
     value : int64
   }
 
-type heap_dump =
-  { function_name : string;
-    target_addr : int64;
-    words : heap_word list
-  }
+type heap_dump = { words : heap_word list }
 
 (** Parse a summary JSON file (.abd.json). *)
 val parse_summary_json : string -> execution_data
@@ -50,4 +44,4 @@ module Int64Set : Set.S with type elt = int64
 val missing_addr_set : missing_entry list -> Int64Set.t
 
 (** Build a lookup from heap dumps: given an address, return the 8-byte value if known. *)
-val heap_lookup : heap_dump list -> (int64 -> int64 option)
+val heap_lookup : heap_dump list -> int64 -> int64 option

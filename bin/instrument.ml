@@ -372,11 +372,12 @@ module Flags = struct
     in
     Arg.(value & flag & info [ "correct-missing-ownership" ] ~doc)
 
+
   let bi_abductive =
     let doc =
-      "Enable bi-abductive execution mode. Instead of failing on ownership \
-       violations, record missing ownership and continue. Outputs \
-       cn_abd_summary.json and cn_abd_heap.jsonl."
+      "Enable bi-abductive execution mode. Instead of failing on ownership violations, \
+       record missing ownership and continue. Outputs cn_abd_summary.json and \
+       cn_abd_heap.jsonl."
     in
     Arg.(value & flag & info [ "bi-abd" ] ~doc)
 end

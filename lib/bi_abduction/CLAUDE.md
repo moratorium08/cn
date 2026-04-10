@@ -59,9 +59,9 @@ the caller's body_missing already reflects it transitively.
 
 **`cn_abd_heap.jsonl`** — one JSON object per line, written incrementally:
 ```json
-{"function":"f","addr":"0x...","words":{"0x...":"0x...",...}}
+{"phase":"pre","words":{"0x...":"0x...",...}}
 ```
-Words are 8-byte-aligned address → 8-byte hex value. Used by `heap_lookup` for pointer chasing.
+`phase` is `"pre"` (H_entry snapshot) or `"post"` (H_exit snapshot). Words are 8-byte-aligned address → 8-byte hex value. Used by `heap_lookup` for pointer chasing.
 
 ## Debug output (`-p N`)
 

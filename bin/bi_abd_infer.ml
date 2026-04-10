@@ -29,21 +29,18 @@ let extract_struct_defs (sigm : _ A.sigma) : (Id.t * Sctypes.t) list Sym.Map.t =
     Sym.Map.empty
     sigm.A.tag_definitions
 
+
 (** Extract predicate definitions from the mucore file. *)
-let extract_pred_defs (prog5 : unit Mucore.file)
-  : Definition.Predicate.t Sym.Map.t
-  =
+let extract_pred_defs (prog5 : unit Mucore.file) : Definition.Predicate.t Sym.Map.t =
   List.fold_left
     (fun acc (sym, pred_def) -> Sym.Map.add sym pred_def acc)
     Sym.Map.empty
     prog5.resource_predicates
 
+
 (** Extract function parameter types from the Ail sigma.
     Maps function name -> list of (parameter name, parameter type). *)
-let extract_function_args
-      (sigm : _ A.sigma)
-  : (string * (string * Sctypes.t) list) list
-  =
+let extract_function_args (sigm : _ A.sigma) : (string * (string * Sctypes.t) list) list =
   List.filter_map
     (fun (fn_sym, (_, _, _, param_syms, _)) ->
        match List.assoc_opt Sym.equal fn_sym sigm.A.declarations with
@@ -59,6 +56,7 @@ let extract_function_args
        | _ -> None)
     sigm.A.function_definitions
 
+
 (** Compile and run the instrumented file as a subprocess.
     Returns the exit code. *)
 let compile_and_run ~cc ~output_dir ~instrumented_file =
@@ -66,8 +64,7 @@ let compile_and_run ~cc ~output_dir ~instrumented_file =
   let includes, lib_path =
     match Sys.getenv_opt "CN_RUNTIME_PREFIX" with
     | Some p when Sys.file_exists (Filename.concat p "include") ->
-      ("-I" ^ Filename.concat p "include",
-       Filename.concat p "libcn_exec.a")
+      ("-I" ^ Filename.concat p "include", Filename.concat p "libcn_exec.a")
     | _ ->
       let opam_rt =
         match Sys.getenv_opt "OPAM_SWITCH_PREFIX" with
@@ -75,8 +72,7 @@ let compile_and_run ~cc ~output_dir ~instrumented_file =
         | None -> ""
       in
       if String.length opam_rt > 0 && Sys.file_exists opam_rt then
-        ("-I" ^ Filename.concat opam_rt "include",
-         Filename.concat opam_rt "libcn_exec.a")
+        ("-I" ^ Filename.concat opam_rt "include", Filename.concat opam_rt "libcn_exec.a")
       else (
         Printf.eprintf
           "Could not find CN runtime. Set CN_RUNTIME_PREFIX or install CN.\n\
@@ -84,11 +80,13 @@ let compile_and_run ~cc ~output_dir ~instrumented_file =
         exit 1)
   in
   let obj_file =
-    Filename.concat output_dir
+    Filename.concat
+      output_dir
       (Filename.remove_extension (Filename.basename instrumented_file) ^ ".o")
   in
   let exe_file =
-    Filename.concat output_dir
+    Filename.concat
+      output_dir
       (Filename.remove_extension (Filename.basename instrumented_file) ^ ".out")
   in
   let cflags = Option.value ~default:"" (Sys.getenv_opt "CFLAGS") in
@@ -96,22 +94,21 @@ let compile_and_run ~cc ~output_dir ~instrumented_file =
   let flags = String.concat " " [ "-g"; cflags; cppflags ] in
   (* Compile *)
   let compile_cmd =
-    Printf.sprintf "%s -c %s %s -o %s %s"
-      cc flags includes obj_file instrumented_file
+    Printf.sprintf "%s -c %s %s -o %s %s" cc flags includes obj_file instrumented_file
   in
   if Sys.command compile_cmd <> 0 then (
     Printf.eprintf "Failed to compile '%s'\n" instrumented_file;
     exit 1);
   (* Link *)
   let link_cmd =
-    Printf.sprintf "%s %s %s -o %s %s %s -lm"
-      cc flags includes exe_file obj_file lib_path
+    Printf.sprintf "%s %s %s -o %s %s %s -lm" cc flags includes exe_file obj_file lib_path
   in
   if Sys.command link_cmd <> 0 then (
     Printf.eprintf "Failed to link '%s'\n" instrumented_file;
     exit 1);
   (* Run as subprocess *)
   Sys.command exe_file
+
 
 let generate_bi_abd
       filename
@@ -212,7 +209,9 @@ let generate_bi_abd
       Printf.printf "Instrumented: %s\n" instrumented_path;
       (* Step 2: Compile and run *)
       Printf.printf "Compiling and running...\n%!";
-      let exit_code = compile_and_run ~cc ~output_dir ~instrumented_file:instrumented_path in
+      let exit_code =
+        compile_and_run ~cc ~output_dir ~instrumented_file:instrumented_path
+      in
       Printf.printf "Execution finished (exit code %d)\n%!" exit_code;
       (* Step 3: Run inference *)
       let summary_file = "cn_abd_summary.json" in
@@ -220,7 +219,7 @@ let generate_bi_abd
       if not (Sys.file_exists summary_file) then (
         Printf.eprintf "No summary file found at %s\n" summary_file;
         Ok ())
-      else begin
+      else (
         Printf.printf "Running inference...\n%!";
         let config = Bi_abduction.Enumerator.default_config in
         let specs =
@@ -236,8 +235,8 @@ let generate_bi_abd
         let doc = Bi_abduction.Infer.pp_suggestions specs in
         Pp.print stdout doc;
         Format.printf "@.";
-        Ok ()
-      end)
+        Ok ()))
+
 
 let cmd =
   let open Term in
@@ -264,9 +263,9 @@ let cmd =
     $ Common.Flags.allow_split_magic_comments
   in
   let doc =
-    "Push-button bi-abductive inference. Instruments [FILE] with \
-     bi-abductive execution support, compiles and runs it, then analyses \
-     the output to suggest CN specifications."
+    "Push-button bi-abductive inference. Instruments [FILE] with bi-abductive execution \
+     support, compiles and runs it, then analyses the output to suggest CN \
+     specifications."
   in
   let info = Cmd.info "bi-abd" ~doc in
   Cmd.v info bi_abd_t

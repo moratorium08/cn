@@ -275,17 +275,21 @@ let generate_c_specs_internal
   in
   (* Record function arguments for bi-abductive inference *)
   let abd_record_args =
-    if bi_abductive then
-      match List.assoc_opt CF.Symbol.equal_sym instrumentation.fn
-              sigm.A.function_definitions with
+    if bi_abductive then (
+      match
+        List.assoc_opt CF.Symbol.equal_sym instrumentation.fn sigm.A.function_definitions
+      with
       | Some (_, _, _, param_syms, _) ->
-        List.map (fun param_sym ->
-          let name = Sym.pp_string param_sym in
-          Printf.sprintf
-            "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s));\n"
-            name name name)
+        List.map
+          (fun param_sym ->
+             let name = Sym.pp_string param_sym in
+             Printf.sprintf
+               "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s));\n"
+               name
+               name
+               name)
           param_syms
-      | None -> []
+      | None -> [])
     else
       []
   in
@@ -301,11 +305,11 @@ let generate_c_specs_internal
     else
       []
   in
-  let pre_strs = abd_push @ abd_record_args @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post in
+  let pre_strs =
+    abd_push @ abd_record_args @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post
+  in
   let post_strs = exit_strs @ cn_spec_inj_info.post_str @ abd_pop in
-  ( [ ( instrumentation.fn,
-        (pre_strs, post_strs) )
-    ],
+  ( [ (instrumentation.fn, (pre_strs, post_strs)) ],
     cn_spec_inj_info.in_stmt_and_loop_inv_injs
     @ stack_local_var_inj_info.block_ownership_stmts,
     stack_local_var_inj_info.return_ownership_stmts )
@@ -761,7 +765,8 @@ let generate_global_assignments
            \t\textern void *fopen(const char *, const char *);\n\
            \t\tvoid *cn_abd_heap_file = fopen(\"cn_abd_heap.jsonl\", \"w\");\n\
            \t\tcn_abd_init(cn_abd_heap_file);\n\
-           \t}\n" ]
+           \t}\n"
+        ]
       else
         []
     in
@@ -786,12 +791,15 @@ let generate_global_assignments
            \t\tcn_abd_dump_summary(cn_abd_summary_file);\n\
            \t\tif (cn_abd_summary_file) fclose(cn_abd_summary_file);\n\
            \t\tcn_abd_destroy();\n\
-           \t}\n" ]
+           \t}\n"
+        ]
       else
         []
     in
-    [ (main_sym, (init_and_global_mapping_str @ abd_init_strs,
-                  abd_cleanup_strs @ global_unmapping_str)) ]
+    [ ( main_sym,
+        ( init_and_global_mapping_str @ abd_init_strs,
+          abd_cleanup_strs @ global_unmapping_str ) )
+    ]
 
 
 (* Needed for handling typedef definitions *)

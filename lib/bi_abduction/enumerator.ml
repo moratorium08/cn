@@ -5,7 +5,6 @@
     to try during coverage analysis. *)
 
 module StdList = Stdlib.List
-
 module Int64Set = Data_point.Int64Set
 module IT = IndexTerms
 module BT = IndexTerms.BT
@@ -16,13 +15,9 @@ type arg =
     owned_ct : Sctypes.t option
   }
 
-type config =
-  { max_qualifiers : int
-  }
+type config = { max_qualifiers : int }
 
-let default_config =
-  { max_qualifiers = 1000
-  }
+let default_config = { max_qualifiers = 1000 }
 
 (** Convert surface BaseTypes.t to internal IndexTerms.BT.t by erasing Loc info. *)
 let rec bt_to_internal : BaseTypes.t -> BT.t = function
@@ -45,17 +40,15 @@ let rec bt_to_internal : BaseTypes.t -> BT.t = function
   | BaseTypes.Set bt -> BT.Set (bt_to_internal bt)
   | BaseTypes.Option bt -> BT.Option (bt_to_internal bt)
 
+
 (** Generate base pointer terms from function arguments. *)
-let base_pointer_terms
-      (args : arg list)
-      (loc : Locations.t)
-  : IT.t list
-  =
+let base_pointer_terms (args : arg list) (loc : Locations.t) : IT.t list =
   args
   |> StdList.filter_map (fun (arg : arg) ->
     match arg.bt with
     | BaseTypes.Loc _ -> Some (IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
     | _ -> None)
+
 
 (** Generate in-scope variable terms matching a requested base type.
     For predicate iargs, prefer terms other than the root pointer first so that
@@ -67,9 +60,7 @@ let arg_terms_for_bt
       ~(bt : BaseTypes.t)
   : IT.t list
   =
-  let matching =
-    StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt) args
-  in
+  let matching = StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt) args in
   let matching =
     match preferred_not with
     | None -> matching
@@ -79,26 +70,20 @@ let arg_terms_for_bt
       in
       preferred @ fallback
   in
-  StdList.map
-    (fun (arg : arg) -> IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
-    matching
+  StdList.map (fun (arg : arg) -> IT.sym_ (arg.sym, bt_to_internal arg.bt, loc)) matching
+
 
 (** Cartesian product of choice lists. *)
 let rec combinations : 'a list list -> 'a list list = function
   | [] -> [ [] ]
   | xs :: rest ->
     let rest_combos = combinations rest in
-    StdList.concat_map
-      (fun x -> StdList.map (fun suffix -> x :: suffix) rest_combos)
-      xs
+    StdList.concat_map (fun x -> StdList.map (fun suffix -> x :: suffix) rest_combos) xs
+
 
 (** Generate Owned qualifiers from the actual pointee type of each pointer
     argument. *)
-let owned_qualifiers
-      ~(args : arg list)
-      ~(loc : Locations.t)
-  : Qualifier.t list
-  =
+let owned_qualifiers ~(args : arg list) ~(loc : Locations.t) : Qualifier.t list =
   StdList.filter_map
     (fun (arg : arg) ->
        match arg.owned_ct with
@@ -107,6 +92,7 @@ let owned_qualifiers
          let ptr_term = IT.sym_ (arg.sym, bt_to_internal arg.bt, loc) in
          Some (Qualifier.owned ~ct ~pointer:ptr_term))
     args
+
 
 (** Generate predicate qualifiers by checking if a predicate's traversal
     pattern matches the memory graph structure. *)
@@ -129,8 +115,9 @@ let predicate_qualifiers
          let sym_addr = StdList.assoc_opt sym_name var_addrs in
          Sym.Map.fold
            (fun pred_name pred_def acc ->
-              if not pred_def.Definition.Predicate.recursive then acc
-              else begin
+              if not pred_def.Definition.Predicate.recursive then
+                acc
+              else (
                 (* Check if THIS pointer connects to missing addresses *)
                 let connects =
                   match sym_addr with
@@ -142,10 +129,16 @@ let predicate_qualifiers
                       (fun a -> Memory_graph.connects_to_missing graph a)
                       anchors
                 in
-                Pp.debug 5 (lazy (Pp.string
-                  (Printf.sprintf "enum: pred %s(%s) connects=%b"
-                     (Sym.pp_string pred_name) sym_name connects)));
-                if connects then begin
+                Pp.debug
+                  5
+                  (lazy
+                    (Pp.string
+                       (Printf.sprintf
+                          "enum: pred %s(%s) connects=%b"
+                          (Sym.pp_string pred_name)
+                          sym_name
+                          connects)));
+                if connects then (
                   let iarg_choices =
                     StdList.map
                       (fun (_iarg_sym, iarg_bt) ->
@@ -154,23 +147,21 @@ let predicate_qualifiers
                   in
                   if StdList.exists (function [] -> true | _ -> false) iarg_choices then
                     acc
-                  else
+                  else (
                     let iarg_combos = combinations iarg_choices in
                     let new_qs =
                       StdList.map
                         (fun iargs ->
-                           Qualifier.predicate
-                             ~name:pred_name
-                             ~pointer:ptr_term
-                             ~iargs)
+                           Qualifier.predicate ~name:pred_name ~pointer:ptr_term ~iargs)
                         iarg_combos
                     in
-                    new_qs @ acc
-                end else
-                  acc
-              end)
-           pred_defs [])
+                    new_qs @ acc))
+                else
+                  acc))
+           pred_defs
+           [])
     ptr_terms
+
 
 (** Main enumeration entry point. *)
 let enumerate
@@ -184,15 +175,20 @@ let enumerate
   =
   let owned_qs = owned_qualifiers ~args ~loc in
   Pp.debug 4 (lazy (Pp.item "enum: owned qualifiers" (Pp.int (StdList.length owned_qs))));
-  let pred_qs =
-    predicate_qualifiers ~args ~pred_defs ~graph ~var_addrs ~loc
-  in
-  Pp.debug 4 (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
+  let pred_qs = predicate_qualifiers ~args ~pred_defs ~graph ~var_addrs ~loc in
+  Pp.debug
+    4
+    (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
   let all = owned_qs @ pred_qs in
-  if StdList.length all > config.max_qualifiers then begin
-    Pp.debug 3 (lazy (Pp.string
-      (Printf.sprintf "enum: truncating %d candidates to %d"
-         (StdList.length all) config.max_qualifiers)));
-    StdList.filteri (fun i _ -> i < config.max_qualifiers) all
-  end else
+  if StdList.length all > config.max_qualifiers then (
+    Pp.debug
+      3
+      (lazy
+        (Pp.string
+           (Printf.sprintf
+              "enum: truncating %d candidates to %d"
+              (StdList.length all)
+              config.max_qualifiers)));
+    StdList.filteri (fun i _ -> i < config.max_qualifiers) all)
+  else
     all
