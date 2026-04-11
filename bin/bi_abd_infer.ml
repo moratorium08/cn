@@ -39,20 +39,31 @@ let extract_pred_defs (prog5 : unit Mucore.file) : Definition.Predicate.t Sym.Ma
 
 
 (** Extract function parameter types from the Ail sigma.
-    Maps function name -> list of (parameter name, parameter type). *)
+    Maps function name -> list of (parameter name, parameter type).
+    Functions with any parameter whose C type cannot be represented as
+    [Sctypes.t] are dropped entirely with a warning, so that downstream
+    inference never runs on a function with partial signature info. *)
 let extract_function_args (sigm : _ A.sigma) : (string * (string * Sctypes.t) list) list =
   List.filter_map
     (fun (fn_sym, (_, _, _, param_syms, _)) ->
        match List.assoc_opt Sym.equal fn_sym sigm.A.declarations with
        | Some (_, _, A.Decl_function (_, _, param_types, _, _, _)) ->
+         let fn_name = Sym.pp_string fn_sym in
          let params =
-           List.combine param_syms param_types
-           |> List.filter_map (fun (param_sym, (_, ctype, _)) ->
-             match Sctypes.of_ctype ctype with
-             | Some ct -> Some (Sym.pp_string param_sym, ct)
-             | None -> None)
+           List.map
+             (fun (param_sym, (_, ctype, _)) ->
+                (Sym.pp_string param_sym, Sctypes.of_ctype ctype))
+             (List.combine param_syms param_types)
          in
-         Some (Sym.pp_string fn_sym, params)
+         (match List.find_opt (fun (_, opt) -> Option.is_none opt) params with
+          | Some (bad_name, _) ->
+            Printf.eprintf
+              "bi-abd: skipping function %s (unsupported C type for parameter %s)\n"
+              fn_name
+              bad_name;
+            None
+          | None ->
+            Some (fn_name, List.map (fun (n, opt) -> (n, Option.get opt)) params))
        | _ -> None)
     sigm.A.function_definitions
 

@@ -58,7 +58,7 @@ let infer_function
       ~(config : Enumerator.config)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-      ~(function_args : (string * (string * Sctypes.t) list) list)
+      ~(signature_args : (string * Sctypes.t) list)
       ~(pre_heap_lookup : int64 -> int64 option)
       ~(post_heap_lookup : int64 -> int64 option)
       ~(func_name : string)
@@ -113,28 +113,22 @@ let infer_function
                ^^^ !^(Printf.sprintf "0x%Lx" v.value)
                ^^^ !^(Printf.sprintf "(%d bytes)" v.size))
             representative_dp.Data_point.pre_vars)));
-  let signature_args =
-    Option.value ~default:[] (StdList.assoc_opt func_name function_args)
-  in
-  let signature_arg_type name = StdList.assoc_opt name signature_args in
-  let arg_bt_of_ct (ct : Sctypes.t) : BaseTypes.t =
-    match ct with Sctypes.Pointer _ -> BaseTypes.Loc () | _ -> Integer
-  in
+  let signature_arg_type name : Sctypes.t = StdList.assoc name signature_args in
   let arg_of_var (v : Data_point.var_binding) : Enumerator.arg =
     let sym = Sym.fresh v.name in
     match signature_arg_type v.name with
-    | Some (Sctypes.Pointer ((Sctypes.Void | Sctypes.Function _) as _ct)) ->
+    | Sctypes.Pointer ((Sctypes.Void | Sctypes.Function _) as _ct) ->
       { sym; bt = BaseTypes.Loc (); owned_ct = None }
-    | Some (Sctypes.Pointer ct) -> { sym; bt = BaseTypes.Loc (); owned_ct = Some ct }
-    | Some ct -> { sym; bt = arg_bt_of_ct ct; owned_ct = None }
-    | None ->
-      let bt : BaseTypes.t =
-        if v.size = 8 then
-          Loc ()
-        else
-          Integer
-      in
-      { sym; bt; owned_ct = None }
+    | Sctypes.Pointer ct -> { sym; bt = BaseTypes.Loc (); owned_ct = Some ct }
+    | Sctypes.Integer _ | Sctypes.Byte ->
+      { sym; bt = BaseTypes.Integer; owned_ct = None }
+    | ct ->
+      failwith
+        (Printf.sprintf
+           "bi-abduction: unsupported argument type for %s in %s: %s"
+           v.name
+           func_name
+           (Pp.plain (Sctypes.pp ct)))
   in
   (* Extract function arguments with actual pointee types when available. *)
   let args = StdList.map arg_of_var representative_dp.pre_vars in
@@ -287,17 +281,25 @@ let infer
             (fun (name, dps) ->
                !^name ^^^ !^(Printf.sprintf "(%d calls)" (StdList.length dps)))
             grouped)));
-  StdList.map
+  StdList.filter_map
     (fun (func_name, dps) ->
-       infer_function
-         ~config
-         ~pred_defs
-         ~struct_defs
-         ~function_args
-         ~pre_heap_lookup
-         ~post_heap_lookup
-         ~func_name
-         ~dps)
+       match StdList.assoc_opt func_name function_args with
+       | None ->
+         Printf.eprintf
+           "bi-abd: skipping %s (no signature info available)\n"
+           func_name;
+         None
+       | Some signature_args ->
+         Some
+           (infer_function
+              ~config
+              ~pred_defs
+              ~struct_defs
+              ~signature_args
+              ~pre_heap_lookup
+              ~post_heap_lookup
+              ~func_name
+              ~dps))
     grouped
 
 
