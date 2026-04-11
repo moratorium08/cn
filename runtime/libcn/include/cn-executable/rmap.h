@@ -35,6 +35,12 @@ rmap_range_res_t rmap_find_range(rmap_key_t k0, rmap_key_t k1, rmap map);
 void rmap_add(rmap_key_t k0, rmap_key_t k1, rmap_value_t v, rmap map);
 void rmap_remove(rmap_key_t k0, rmap_key_t k1, rmap map);
 
+/** Iterate over all non-empty leaf ranges in the map.
+ *  For each leaf, calls cb(k0, k1, v, ctx) where [k0, k1] is the key range
+ *  and v is the stored value. */
+typedef void (*rmap_foreach_cb)(rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx);
+void rmap_foreach(rmap map, rmap_foreach_cb cb, void *ctx);
+
 #ifdef _RMAP_DEBUG
 bool rmap_is_wf(rmap map);
 void dump(FILE *stream, bool, rmap);

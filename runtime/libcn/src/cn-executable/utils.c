@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <cn-executable/bi_abduction.h>
 #include <cn-executable/rmap.h>
 #include <cn-executable/utils.h>
 
@@ -291,9 +292,26 @@ void ghost_stack_depth_decr(void) {
   // cn_printf(CN_LOGGING_INFO, "\n");
 }
 
+/* Callback for rmap_foreach used in bi-abductive leak check */
+static void abd_leak_collect_cb(
+    rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx) {
+  signed long depth = *(signed long *)ctx;
+  if (v > depth) {
+    for (rmap_key_t addr = k0; addr <= k1; addr++) {
+      cn_abd_record_post_remaining(addr, 1);
+    }
+  }
+}
+
 void cn_postcondition_leak_check(void) {
   rmap_range_res_t res = rmap_find_range(0UL, -1UL, cn_ownership_global_ghost_state);
   if (res.defined && res.max > cn_stack_depth) {
+    if (cn_abd_is_enabled()) {
+      /* Collect leaked addresses instead of failing */
+      rmap_foreach(cn_ownership_global_ghost_state, abd_leak_collect_cb,
+          &cn_stack_depth);
+      return;
+    }
     print_error_msg_info(global_error_msg_info);
     // XXX TODO: scan for the failing address
     // cn_printf(CN_LOGGING_ERROR,
@@ -525,19 +543,26 @@ void report_and_correct_missing_ownership(
   if (depth == UNMAPPED_VAL || depth < expected_stack_depth) {
     assert(size > 0);
 
-    // report missing ownership
-    if (global_error_msg_info)
-      print_error_msg_info_single(global_error_msg_info);
-    if (size == 1) {
-      cn_printf(CN_LOGGING_INFO,
-          "  ==> " FMT_PTR " missing ownership specification.\n",
-          (unsigned long)addr);
+    if (cn_abd_is_enabled()) {
+      /* Bi-abductive mode: silently record missing ownership for inference */
+      for (size_t a = (size_t)addr; a < (size_t)addr + size; a++) {
+        cn_abd_record_missing((uintptr_t)a, 1);
+      }
     } else {
-      cn_printf(CN_LOGGING_INFO,
-          "  ==> " FMT_PTR "..." FMT_PTR " (%d bytes) missing ownership specification.\n",
-          (unsigned long)addr,
-          (unsigned long)addr + size - 1,
-          (int)size);
+      // report missing ownership
+      if (global_error_msg_info)
+        print_error_msg_info_single(global_error_msg_info);
+      if (size == 1) {
+        cn_printf(CN_LOGGING_INFO,
+            "  ==> " FMT_PTR " missing ownership specification.\n",
+            (unsigned long)addr);
+      } else {
+        cn_printf(CN_LOGGING_INFO,
+            "  ==> " FMT_PTR "..." FMT_PTR " (%d bytes) missing ownership specification.\n",
+            (unsigned long)addr,
+            (unsigned long)addr + size - 1,
+            (int)size);
+      }
     }
 
     // correct entry in ghost state
@@ -559,7 +584,7 @@ enum region_owned c_ownership_check(
       return FULL_WILDCARD;
     else if (res.max == expected_stack_depth)
       return NO_WILDCARD;
-    else if (correct_missing_ownership) {
+    else if (correct_missing_ownership || cn_abd_is_enabled()) {
       report_and_correct_missing_ownership(address, size, res.max, expected_stack_depth);
       return NO_WILDCARD;
     }
@@ -569,7 +594,7 @@ enum region_owned c_ownership_check(
   for (size_t addr = address; addr < address + size; addr++) {
     int depth = ownership_ghost_state_get(addr);
     if (depth != expected_stack_depth && depth != WILDCARD_DEPTH) {
-      if (correct_missing_ownership) {
+      if (correct_missing_ownership || cn_abd_is_enabled()) {
         report_and_correct_missing_ownership(addr, 1, depth, expected_stack_depth);
       } else {
         print_error_msg_info(global_error_msg_info);

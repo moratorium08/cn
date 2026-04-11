@@ -1,0 +1,24 @@
+(** Bounded enumeration of candidate qualifiers. *)
+
+type arg =
+  { sym : Sym.t;
+    bt : BaseTypes.t;
+    owned_ct : Sctypes.t option
+  }
+
+type config = { max_qualifiers : int }
+
+val default_config : config
+
+(** Generate base pointer terms from function arguments. *)
+val base_pointer_terms : arg list -> Locations.t -> IndexTerms.t list
+
+(** Enumerate candidate qualifiers for a function. *)
+val enumerate
+  :  config:config ->
+  args:arg list ->
+  pred_defs:Definition.Predicate.t Sym.Map.t ->
+  graph:Memory_graph.t ->
+  var_addrs:(string * int64) list ->
+  loc:Locations.t ->
+  Qualifier.t list

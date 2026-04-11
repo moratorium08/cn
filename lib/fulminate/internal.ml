@@ -221,6 +221,7 @@ let generate_c_specs_from_cn_internal
 
 
 let generate_c_specs_internal
+      ~bi_abductive
       without_ownership_checking
       without_loop_invariants
       with_loop_leak_checks
@@ -265,9 +266,50 @@ let generate_c_specs_internal
       c_ownership_comment :: stack_local_var_inj_info.exit_ownership_str
   in
   (* NOTE - the nesting pre - entry - exit - post *)
-  ( [ ( instrumentation.fn,
-        (cn_spec_inj_info.pre_str @ entry_strs, exit_strs @ cn_spec_inj_info.post_str) )
-    ],
+  let func_name = Sym.pp_string instrumentation.fn in
+  let abd_push =
+    if bi_abductive then
+      [ Printf.sprintf "\tcn_abd_push_frame(\"%s\");\n" func_name ]
+    else
+      []
+  in
+  (* Record function arguments for bi-abductive inference *)
+  let abd_record_args =
+    if bi_abductive then (
+      match
+        List.assoc_opt CF.Symbol.equal_sym instrumentation.fn sigm.A.function_definitions
+      with
+      | Some (_, _, _, param_syms, _) ->
+        List.map
+          (fun param_sym ->
+             let name = Sym.pp_string param_sym in
+             Printf.sprintf
+               "\tcn_abd_record_var(\"%s\", (uintptr_t)%s, sizeof(%s));\n"
+               name
+               name
+               name)
+          param_syms
+      | None -> [])
+    else
+      []
+  in
+  let abd_mark_post =
+    if bi_abductive then
+      [ "\tcn_abd_mark_post();\n" ]
+    else
+      []
+  in
+  let abd_pop =
+    if bi_abductive then
+      [ "\tcn_abd_pop_frame();\n" ]
+    else
+      []
+  in
+  let pre_strs =
+    abd_push @ abd_record_args @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post
+  in
+  let post_strs = exit_strs @ cn_spec_inj_info.post_str @ abd_pop in
+  ( [ (instrumentation.fn, (pre_strs, post_strs)) ],
     cn_spec_inj_info.in_stmt_and_loop_inv_injs
     @ stack_local_var_inj_info.block_ownership_stmts,
     stack_local_var_inj_info.return_ownership_stmts )
@@ -317,6 +359,7 @@ let generate_c_assume_pres_internal
 
 (* Extract.instrumentation list -> executable_spec *)
 let generate_c_specs
+      ~bi_abductive
       without_ownership_checking
       without_loop_invariants
       with_loop_leak_checks
@@ -330,6 +373,7 @@ let generate_c_specs
   =
   let generate_c_spec (instrumentation : Extract.instrumentation) =
     generate_c_specs_internal
+      ~bi_abductive
       without_ownership_checking
       without_loop_invariants
       with_loop_leak_checks
@@ -663,6 +707,7 @@ let generate_global_assignments
       ?(exec_c_locs_mode = false)
       ?(correct_missing_ownership_mode = false)
       ?(experimental_ownership_stack_mode = false)
+      ?(bi_abductive = false)
       ?max_bump_blocks
       ?bump_block_size
       (cabs_tunit : CF.Cabs.translation_unit)
@@ -713,6 +758,18 @@ let generate_global_assignments
               ]
           @ global_map_stmts_ )
     in
+    let abd_init_strs =
+      if bi_abductive then
+        [ "\t/* Bi-abductive mode: initialise */\n\
+           \t{\n\
+           \t\textern void *fopen(const char *, const char *);\n\
+           \t\tvoid *cn_abd_heap_file = fopen(\"cn_abd_heap.jsonl\", \"w\");\n\
+           \t\tcn_abd_init(cn_abd_heap_file);\n\
+           \t}\n"
+        ]
+      else
+        []
+    in
     let global_unmapping_stmts_ = List.map OE.generate_c_local_ownership_exit globals in
     let free_ghost_array_fn_str = "free_ghost_array" in
     let free_ghost_array_decl =
@@ -724,7 +781,25 @@ let generate_global_assignments
     let global_unmapping_str =
       generate_ail_stat_strs ([], global_unmapping_stmts_ @ [ free_ghost_array_decl ])
     in
-    [ (main_sym, (init_and_global_mapping_str, global_unmapping_str)) ]
+    let abd_cleanup_strs =
+      if bi_abductive then
+        [ "\t/* Bi-abductive mode: dump summary and clean up */\n\
+           \t{\n\
+           \t\textern void *fopen(const char *, const char *);\n\
+           \t\textern int fclose(void *);\n\
+           \t\tvoid *cn_abd_summary_file = fopen(\"cn_abd_summary.json\", \"w\");\n\
+           \t\tcn_abd_dump_summary(cn_abd_summary_file);\n\
+           \t\tif (cn_abd_summary_file) fclose(cn_abd_summary_file);\n\
+           \t\tcn_abd_destroy();\n\
+           \t}\n"
+        ]
+      else
+        []
+    in
+    [ ( main_sym,
+        ( init_and_global_mapping_str @ abd_init_strs,
+          abd_cleanup_strs @ global_unmapping_str ) )
+    ]
 
 
 (* Needed for handling typedef definitions *)
