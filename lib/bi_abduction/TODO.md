@@ -23,27 +23,22 @@ Approach (c) is cleanest. In `bi_abduction.c`, add a `source` tag to each missin
 
 ## Critical: Multiple executions are not generalised
 
-**`baseline_multi_call_list.c` produces 0 selected, 32 uncovered.**
+**Baseline status:** the implementation now intentionally infers from **one
+representative execution** only. This avoids mixing incompatible concrete
+addresses from distinct runs, but it also means extra executions are currently
+ignored rather than generalised.
 
-Two independent issues:
+This keeps the baseline concrete and readable, but it leaves important value on
+the table:
 
-### Issue 1: `must_cover_set` unions addresses across calls
+- different calls may exercise different shapes (e.g. length-1 vs length-3),
+- base cases may be the only runs where some boundary iargs are visible,
+- and confidence should grow when multiple runs agree on the same qualifier.
 
-`post_must_cover_set` computes `⋃ᵢ missing(dpᵢ)`. When different calls have different stack addresses (e.g., call 1 at `0x100`, call 2 at `0x200`), the union mixes addresses from incompatible concrete heaps. The representative data point's candidates can only cover its own addresses, leaving the other call's addresses uncovered.
-
-**Fix**: Compute must-cover *per data point*, run cover per data point, then take the intersection (or vote) of selected qualifiers across data points. A qualifier is "confirmed" if it's selected in a majority of non-trivial data points.
-
-### Issue 2: `exact_cover` only tracks complete covers
-
-The exact cover algorithm (used for ≤20 candidates) updates `best` only when `Int64Set.is_empty remaining` — i.e., only when ALL must-cover addresses are explained. If no complete cover exists (common with mixed-address must-cover sets), it returns `{ selected = []; uncovered = must_cover }`.
-
-**Fix**: Track best partial cover too. When a subset covers more must-cover addresses than `best`, update `best` even if some addresses remain uncovered. The greedy algorithm already handles this correctly.
-
-### Issue 3: Single representative for graph construction
-
-The memory graph is built from one data point. Different calls exercise different structure shapes (e.g., length-1 list vs length-3 list). Using only one misses patterns visible in others.
-
-**Fix (longer term)**: Build graphs from multiple data points and merge/intersect them. Or abstract the graph into a symbolic shape (e.g., "chain of struct node of unknown length").
+**Future fix**: compute cover per data point, then combine the selected
+qualifiers by intersection, voting, or another simple consensus rule. Longer
+term, the concrete heaps from several runs could be merged into a more
+structured shape abstraction.
 
 
 ## Partial specifications
@@ -242,7 +237,7 @@ Suggestions are printed as comments, not integrated back into the source file. I
 ## Summary: priority ordering
 
 1. **Pre/post splitting** — without this, half the spec is always empty
-2. **Per-data-point cover + exact_cover partial fix** — without this, multiple calls break inference
+2. **Per-data-point cover / multi-run consensus** — needed to learn from several executions instead of one representative run
 3. **Qualifier chains** — needed for most real predicates (the predicate unfolds through struct fields)
 4. **Return value** — needed for post-conditions like `ensures take R = List(return)`
 5. **Argument type from C signature** — low effort, fixes false positives

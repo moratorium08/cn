@@ -1,7 +1,6 @@
 /* Expected: IntListSeg(xs, (void *)0) or equivalent null boundary.
-   Current baseline instantiation only draws predicate arguments from in-scope
-   variables, so it cannot synthesize the needed NULL constant and instead
-   suggests the nonsense segment IntListSeg(xs, xs). */
+   The baseline now allows NULL as a concrete candidate for pointer-valued
+   predicate iargs, so it does not need to reuse xs as the boundary. */
 
 #include <stddef.h>
 

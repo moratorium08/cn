@@ -76,10 +76,10 @@ let infer_function
       (item
          "struct layouts"
          (Pp.int (Sym.Map.cardinal struct_layouts) ^^^ !^"struct types")));
-  (* Pick the data point with the most missing addresses as representative.
-     For recursive functions, base cases (e.g., NULL) have empty missing sets,
-     so we need the call with the richest data. *)
-  (* TODO (HK): Handle multiple data points at once *)
+  (* Baseline mode: infer from one representative execution only.
+     This keeps the concrete story simple and avoids mixing incompatible heap
+     addresses from distinct runs. Generalising across executions is left to
+     the TODO path. *)
   let representative_dp =
     StdList.fold_left
       (fun best (dp : Data_point.data_point) ->
@@ -168,13 +168,7 @@ let infer_function
                 (Memory_graph.Int64Map.cardinal (Memory_graph.info graph))
                 (Int64Set.cardinal (Memory_graph.anchors graph))
                 (Int64Set.cardinal (Memory_graph.missing graph)))));
-    let must_cover =
-      StdList.fold_left
-        (fun acc dp ->
-           Int64Set.union acc (Data_point.missing_addr_set (select_missing dp)))
-        Int64Set.empty
-        dps
-    in
+    let must_cover = missing_set in
     let candidates_raw =
       Enumerator.enumerate ~config ~args ~pred_defs ~graph ~var_addrs ~loc
     in

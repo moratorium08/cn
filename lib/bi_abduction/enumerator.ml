@@ -5,9 +5,9 @@
     to try during coverage analysis. *)
 
 module StdList = Stdlib.List
-module Int64Set = Data_point.Int64Set
 module IT = IndexTerms
 module BT = IndexTerms.BT
+module LAT = LogicalArgumentTypes
 
 type arg =
   { sym : Sym.t;
@@ -61,16 +61,24 @@ let arg_terms_for_bt
   : IT.t list
   =
   let matching = StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt) args in
-  let matching =
+  let preferred, fallback =
     match preferred_not with
-    | None -> matching
+    | None -> (matching, [])
     | Some avoid_sym ->
-      let preferred, fallback =
-        StdList.partition (fun (arg : arg) -> not (Sym.equal arg.sym avoid_sym)) matching
-      in
-      preferred @ fallback
+      StdList.partition (fun (arg : arg) -> not (Sym.equal arg.sym avoid_sym)) matching
   in
-  StdList.map (fun (arg : arg) -> IT.sym_ (arg.sym, bt_to_internal arg.bt, loc)) matching
+  let to_terms =
+    StdList.map (fun (arg : arg) -> IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
+  in
+  let preferred_terms = to_terms preferred in
+  let fallback_terms = to_terms fallback in
+  match bt with
+  | BaseTypes.Loc _ ->
+    let null_term = IT.null_ loc in
+    (match preferred_terms with
+     | [] -> null_term :: fallback_terms
+     | _ -> preferred_terms @ (null_term :: fallback_terms))
+  | _ -> preferred_terms @ fallback_terms
 
 
 (** Cartesian product of choice lists. *)
@@ -94,6 +102,39 @@ let owned_qualifiers ~(args : arg list) ~(loc : Locations.t) : Qualifier.t list 
     args
 
 
+let predicate_root_ct (pred_def : Definition.Predicate.t) : Sctypes.t option =
+  let root_request_ct ((_, (req, _bt)) : Sym.t * (Request.t * BaseTypes.t)) =
+    match req with
+    | Request.P { name = Owned (ct, _); pointer; iargs = [] } ->
+      (match IT.is_sym pointer with
+       | Some (sym, BT.Loc ()) when Sym.equal sym pred_def.pointer -> Some ct
+       | _ -> None)
+    | _ -> None
+  in
+  match pred_def.clauses with
+  | None -> None
+  | Some clauses ->
+    StdList.find_map
+      (fun (clause : Definition.Clause.t) ->
+         StdList.find_map root_request_ct (LAT.r_resource_requests clause.packing_ft))
+      clauses
+
+
+let predicate_root_matches_arg (arg : arg) (pred_def : Definition.Predicate.t) : bool =
+  match (arg.owned_ct, predicate_root_ct pred_def) with
+  | Some arg_ct, Some pred_ct -> Sctypes.equal arg_ct pred_ct
+  | _ -> false
+
+
+let dedup (qs : Qualifier.t list) : Qualifier.t list =
+  StdList.rev
+    (StdList.fold_left
+       (fun acc q ->
+          if StdList.exists (Qualifier.equal q) acc then acc else q :: acc)
+       []
+       qs)
+
+
 (** Generate predicate qualifiers by checking if a predicate's traversal
     pattern matches the memory graph structure. *)
 let predicate_qualifiers
@@ -104,30 +145,24 @@ let predicate_qualifiers
       ~(loc : Locations.t)
   : Qualifier.t list
   =
-  let ptr_terms = base_pointer_terms args loc in
   StdList.concat_map
-    (fun ptr_term ->
-       match IT.is_sym ptr_term with
-       | None -> []
-       | Some (sym, _bt) ->
-         (* Look up this pointer's concrete address *)
-         let sym_name = Sym.pp_string sym in
+    (fun (arg : arg) ->
+       match arg.bt with
+       | BaseTypes.Loc _ ->
+         let ptr_term = IT.sym_ (arg.sym, bt_to_internal arg.bt, loc) in
+         let sym_name = Sym.pp_string arg.sym in
          let sym_addr = StdList.assoc_opt sym_name var_addrs in
          Sym.Map.fold
            (fun pred_name pred_def acc ->
-              if not pred_def.Definition.Predicate.recursive then
+              if (not pred_def.Definition.Predicate.recursive)
+                 || not (predicate_root_matches_arg arg pred_def)
+              then
                 acc
               else (
-                (* Check if THIS pointer connects to missing addresses *)
                 let connects =
                   match sym_addr with
                   | Some addr -> Memory_graph.connects_to_missing graph addr
-                  | None ->
-                    (* Fallback: check all anchors *)
-                    let anchors = Memory_graph.anchors graph in
-                    Int64Set.exists
-                      (fun a -> Memory_graph.connects_to_missing graph a)
-                      anchors
+                  | None -> false
                 in
                 Pp.debug
                   5
@@ -138,16 +173,22 @@ let predicate_qualifiers
                           (Sym.pp_string pred_name)
                           sym_name
                           connects)));
-                if connects then (
+                if not connects then
+                  acc
+                else
                   let iarg_choices =
                     StdList.map
                       (fun (_iarg_sym, iarg_bt) ->
-                         arg_terms_for_bt ~args ~loc ~preferred_not:(Some sym) ~bt:iarg_bt)
+                         arg_terms_for_bt
+                           ~args
+                           ~loc
+                           ~preferred_not:(Some arg.sym)
+                           ~bt:iarg_bt)
                       pred_def.iargs
                   in
                   if StdList.exists (function [] -> true | _ -> false) iarg_choices then
                     acc
-                  else (
+                  else
                     let iarg_combos = combinations iarg_choices in
                     let new_qs =
                       StdList.map
@@ -156,11 +197,10 @@ let predicate_qualifiers
                         iarg_combos
                     in
                     new_qs @ acc))
-                else
-                  acc))
            pred_defs
-           [])
-    ptr_terms
+           []
+       | _ -> [])
+    args
 
 
 (* HK(TODO): make this lazy *)
@@ -181,7 +221,7 @@ let enumerate
   Pp.debug
     4
     (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
-  let all = owned_qs @ pred_qs in
+  let all = dedup (owned_qs @ pred_qs) in
   if StdList.length all > config.max_qualifiers then (
     Pp.debug
       3

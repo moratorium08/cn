@@ -60,7 +60,7 @@ expectations_for() {
     baseline_wrapper_lists.c)
       printf '%s\n' \
         '/* Function: total_length */' \
-        'take _ = IntList(b);'
+        '/* inference failed */'
       ;;
     extra_iarg_name_capture.c)
       printf '%s\n' \
@@ -75,7 +75,7 @@ expectations_for() {
     extra_null_boundary_argument.c)
       printf '%s\n' \
         '/* Function: list_length */' \
-        'take _ = IntListSeg(xs, xs);'
+        'take _ = IntListSeg(xs, NULL);'
       ;;
     extra_predicate_body_ignored.c)
       printf '%s\n' \

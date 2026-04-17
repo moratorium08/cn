@@ -21,9 +21,9 @@ Entry points:
 | `data_point.ml` | Parse `cn_abd_summary.json` (lightweight: missing addrs + var bindings) and `cn_abd_heap.jsonl` (raw memory words). Types: `var_binding`, `missing_entry`, `data_point`, `heap_dump`. |
 | `memory_graph.ml` | Build a directed graph from heap data. Nodes = addresses, edges = struct field offsets or pointer dereferences. BFS from anchors (function args) through pointer-sized fields to discover linked structures. |
 | `qualifier.ml` | Thin wrapper around `Request.t`. A qualifier = a candidate `take _ = ...` binding. Uses CN's existing `Request.t`, `IndexTerms.t`, `Sctypes.t` — no parallel type hierarchy. |
-| `enumerator.ml` | Generate candidate qualifiers: `Owned<struct_type>(ptr)` for each pointer arg × struct type, plus `Pred(ptr)` for each recursive predicate whose pointer connects to missing addresses in the graph. |
+| `enumerator.ml` | Generate candidate qualifiers from the current function scope: exact `Owned<T>(arg)` for pointer args, plus recursive predicate candidates rooted at arguments whose pointee type matches the predicate's root cell and whose concrete address connects to missing bytes. Pointer iargs may reuse in-scope pointers or `NULL`. |
 | `footprint.ml` | Compute which byte-addresses a qualifier covers. `Owned` → `[base, base+size)`. Predicates → `reachable_struct_bytes` from the memory graph. |
-| `cover.ml` | Disjoint set cover: pick minimal qualifier subset covering all missing addresses. Exact (all subsets) for ≤20 candidates, greedy otherwise. |
+| `cover.ml` | Greedy disjoint cover: pick a small qualifier subset covering as many missing bytes as possible without overlapping footprints. |
 | `infer.ml` | Top-level orchestrator. Picks best representative data point, wires everything together, formats output. |
 
 ## Key design decisions
@@ -31,8 +31,9 @@ Entry points:
 - **Reuse CN types** — qualifiers are `Request.t`, terms are `IndexTerms.t`. No separate AST.
 - **Byte-level granularity** — the runtime records missing addresses per-byte. Footprints must also be per-byte. `owned_footprint` strides by 1, not 8.
 - **BFS graph expansion** — the memory graph follows pointer chains through intermediate nodes (e.g. n2 in `p→n1→n2→n3`) that aren't themselves missing. Without this, linked structure inference doesn't work.
-- **Representative data point** — for recursive functions, base cases (e.g. `t=NULL`) have empty missing sets. We pick the data point with the most missing addresses.
+- **Representative execution baseline** — inference currently works from one representative data point, chosen as the call with the richest missing set. Multi-run generalisation is intentionally left to `TODO.md`.
 - **Struct byte expansion** — `reachable_struct_bytes` expands struct base addresses to full `[base, base+struct_total_size)` byte ranges. This bridges the gap between graph-level nodes and byte-level missing sets.
+- **Root-type filtering** — a recursive predicate is only considered at an argument whose pointee type matches the predicate's first owned root cell. This avoids suggestions like `IntList(b)` when `b` is really a wrapper struct pointer.
 
 ## CN/Cerberus conventions to know
 
@@ -78,7 +79,7 @@ The inference modules use `Pp.debug` at these levels:
 See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 
 - **Only postconditions are inferred** — `body_missing` captures all body ownership failures, which conflates precondition and postcondition needs
-- **Multiple executions break inference** — `must_cover_set` unions addresses from different calls; `exact_cover` only tracks complete covers
+- **Multiple executions are not generalised yet** — the baseline uses one representative run and ignores the others
 - **No partial spec awareness** — suggested qualifiers may overlap with existing takes
 - **No iterated resources, free/malloc, loop invariants, qualifier chains, return value**
 
