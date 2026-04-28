@@ -10,9 +10,6 @@ type config = { max_qualifiers : int }
 
 val default_config : config
 
-(** Generate base pointer terms from function arguments. *)
-val base_pointer_terms : arg list -> Locations.t -> IndexTerms.t list
-
 (** Enumerate candidate qualifiers for a function. *)
 val enumerate
   :  config:config ->

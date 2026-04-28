@@ -40,14 +40,6 @@ let rec bt_to_internal : BaseTypes.t -> BT.t = function
   | BaseTypes.Option bt -> BT.Option (bt_to_internal bt)
 
 
-(** Generate base pointer terms from function arguments. *)
-let base_pointer_terms (args : arg list) (loc : Locations.t) : IT.t list =
-  args
-  |> StdList.filter_map (fun (arg : arg) ->
-    match arg.bt with
-    | BaseTypes.Loc _ -> Some (IT.sym_ (arg.sym, bt_to_internal arg.bt, loc))
-    | _ -> None)
-
 
 let arg_term ~(loc : Locations.t) (arg : arg) : IT.t =
   IT.sym_ (arg.sym, bt_to_internal arg.bt, loc)
