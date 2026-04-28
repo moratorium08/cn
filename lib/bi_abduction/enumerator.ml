@@ -49,59 +49,38 @@ let base_pointer_terms (args : arg list) (loc : Locations.t) : IT.t list =
     | _ -> None)
 
 
-type term_choice =
-  { term : IT.t;
-    arg_sym : Sym.t option
-  }
+let arg_term ~(loc : Locations.t) (arg : arg) : IT.t =
+  IT.sym_ (arg.sym, bt_to_internal arg.bt, loc)
 
 
-let arg_choice ~(loc : Locations.t) (arg : arg) : term_choice =
-  { term = IT.sym_ (arg.sym, bt_to_internal arg.bt, loc); arg_sym = Some arg.sym }
-
-
-let bits_constants (sign, sz) loc : term_choice list =
+let bits_constants (sign, sz) loc : IT.t list =
   [ 0; 1; -1 ]
   |> StdList.filter_map (fun n ->
     let z = Z.of_int n in
-    if BT.fits_range (sign, sz) z then
-      Some { term = IT.num_lit_ z (BT.Bits (sign, sz)) loc; arg_sym = None }
-    else
-      None)
+    if BT.fits_range (sign, sz) z then Some (IT.num_lit_ z (BT.Bits (sign, sz)) loc) else None)
 
 
 (** Simple literal choices used for predicate iargs.  These are deliberately
     small: the naive part is in trying every well-typed placement, not in
     inventing arbitrary literal values. *)
-let constant_choices_for_bt ~(loc : Locations.t) (bt : BaseTypes.t) : term_choice list =
+let constant_choices_for_bt ~(loc : Locations.t) (bt : BaseTypes.t) : IT.t list =
   match bt with
-  | BaseTypes.Unit -> [ { term = IT.unit_ loc; arg_sym = None } ]
-  | BaseTypes.Bool ->
-    [ { term = IT.bool_ true loc; arg_sym = None };
-      { term = IT.bool_ false loc; arg_sym = None }
-    ]
-  | BaseTypes.Integer ->
-    [ { term = IT.int_ 0 loc; arg_sym = None };
-      { term = IT.int_ 1 loc; arg_sym = None };
-      { term = IT.int_ (-1) loc; arg_sym = None }
-    ]
+  | BaseTypes.Unit -> [ IT.unit_ loc ]
+  | BaseTypes.Bool -> [ IT.bool_ true loc; IT.bool_ false loc ]
+  | BaseTypes.Integer -> [ IT.int_ 0 loc; IT.int_ 1 loc; IT.int_ (-1) loc ]
   | BaseTypes.Bits (sign, sz) -> bits_constants (sign, sz) loc
-  | BaseTypes.Real ->
-    [ { term = IT.q_ (0, 1) loc; arg_sym = None };
-      { term = IT.q_ (1, 1) loc; arg_sym = None }
-    ]
-  | BaseTypes.Loc _ -> [ { term = IT.null_ loc; arg_sym = None } ]
+  | BaseTypes.Real -> [ IT.q_ (0, 1) loc; IT.q_ (1, 1) loc ]
+  | BaseTypes.Loc _ -> [ IT.null_ loc ]
   | _ -> []
 
 
 (** Generate all terms matching a requested base type from in-scope arguments
     and small constants. *)
-let choices_for_bt ~(args : arg list) ~(loc : Locations.t) ~(bt : BaseTypes.t)
-  : term_choice list
-  =
+let choices_for_bt ~(args : arg list) ~(loc : Locations.t) ~(bt : BaseTypes.t) : IT.t list =
   let arg_choices =
     args
     |> StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt)
-    |> StdList.map (arg_choice ~loc)
+    |> StdList.map (arg_term ~loc)
   in
   arg_choices @ constant_choices_for_bt ~loc bt
 
@@ -131,9 +110,7 @@ let dedup (qs : Qualifier.t list) : Qualifier.t list =
 
     This intentionally avoids heap-shape and predicate-body heuristics.  For
     each predicate and each pointer argument as root, enumerate every well-typed
-    assignment of predicate iargs from function arguments plus simple constants.
-    Function arguments are used as a typed permutation: the same argument symbol
-    is not reused within one predicate application. *)
+    assignment of predicate iargs from function arguments plus simple constants. *)
 let predicate_qualifiers
       ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
@@ -144,27 +121,14 @@ let predicate_qualifiers
     args
     |> StdList.filter (fun (arg : arg) ->
       match arg.bt with BaseTypes.Loc _ -> true | _ -> false)
-    |> StdList.map (arg_choice ~loc)
+    |> StdList.map (arg_term ~loc)
   in
-  let arg_already_used used = function
-    | None -> false
-    | Some sym -> StdList.exists (Sym.equal sym) used
-  in
-  let rec choose_iargs used = function
+  let rec choose_iargs = function
     | [] -> [ [] ]
     | (_iarg_sym, iarg_bt) :: rest ->
-      let choices =
-        choices_for_bt ~args ~loc ~bt:iarg_bt
-        |> StdList.filter (fun choice -> not (arg_already_used used choice.arg_sym))
-      in
+      let choices = choices_for_bt ~args ~loc ~bt:iarg_bt in
       StdList.concat_map
-        (fun choice ->
-           let used =
-             match choice.arg_sym with None -> used | Some sym -> sym :: used
-           in
-           StdList.map
-             (fun suffix -> choice.term :: suffix)
-             (choose_iargs used rest))
+        (fun choice -> StdList.map (fun suffix -> choice :: suffix) (choose_iargs rest))
         choices
   in
   Sym.Map.fold
@@ -172,12 +136,9 @@ let predicate_qualifiers
        let new_qs =
          StdList.concat_map
            (fun root ->
-              let used =
-                match root.arg_sym with None -> [] | Some sym -> [ sym ]
-              in
-              choose_iargs used pred_def.iargs
+              choose_iargs pred_def.iargs
               |> StdList.map (fun iargs ->
-                Qualifier.predicate ~name:pred_name ~pointer:root.term ~iargs))
+                Qualifier.predicate ~name:pred_name ~pointer:root ~iargs))
            root_choices
        in
        new_qs @ acc)
