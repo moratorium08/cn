@@ -331,7 +331,7 @@ let emit_main (qualifiers : (int * Qualifier.t) list) (output_json_path : string
 
 (* ---------- Top-level emit ---------- *)
 
-let emit (input : input) : string =
+let emit_inner (input : input) : string =
   Records.populate_record_map [] input.prog5;
   let _, sigm = (None, input.ail_prog) in
   let c_predicate_defs, c_predicate_decls, _ =
@@ -405,3 +405,7 @@ let emit (input : input) : string =
   StdList.iter (buf_add b) q_fns;
   buf_add b (emit_main input.qualifiers input.output_json_path);
   Buffer.contents b
+
+
+let emit (input : input) : string =
+  Cerb_colour.without_colour (fun () -> emit_inner input) ()
