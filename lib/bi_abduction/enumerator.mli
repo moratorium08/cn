@@ -15,7 +15,5 @@ val enumerate
   :  config:config ->
   args:arg list ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->
-  graph:Memory_graph.t ->
-  var_addrs:(string * int64) list ->
   loc:Locations.t ->
   Qualifier.t list
