@@ -832,7 +832,6 @@ let generate_get_or_put_ownership_function ~without_ownership_checking ctype
                     List.map mk_expr ownership_fn_args ))))
       ])
   in
-  let deref_expr_ = A.(AilEunary (Indirection, cast_expr)) in
   let sct_opt = Sctypes.of_ctype ctype in
   let sct =
     match sct_opt with
@@ -842,7 +841,37 @@ let generate_get_or_put_ownership_function ~without_ownership_checking ctype
   in
   let bt = BT.of_sct Memory.is_signed_integer_type Memory.size_of_integer_type sct in
   let ret_type = bt_to_ail_ctype bt in
-  let return_stmt = A.(AilSreturn (mk_expr (wrap_with_convert_to ~sct deref_expr_ bt))) in
+  (* Route the dereference through [cn_owned_load], which honours an optional
+     load hook used by bi-abductive footprint mode.  Default behaviour (hook
+     == NULL) is byte-equivalent to [*p], so non-bi-abd compilations are
+     unaffected.  Skipped under [without_ownership_checking] to keep the
+     [deref_T] variant zero-overhead. *)
+  let load_bs, load_ss, value_expr =
+    if without_ownership_checking then
+      ([], [], A.(AilEunary (Indirection, cast_expr)))
+    else (
+      let loaded_sym = Sym.fresh "__cn_loaded" in
+      let loaded_binding = create_binding loaded_sym ctype in
+      let loaded_decl = A.(AilSdeclaration [ (loaded_sym, None) ]) in
+      let load_fn_sym = Sym.fresh "cn_owned_load" in
+      let loaded_addr =
+        mk_expr A.(AilEunary (Address, mk_expr (AilEident loaded_sym)))
+      in
+      let load_args =
+        [ mk_expr A.(AilEident generic_c_ptr_sym);
+          mk_expr A.(AilEsizeof (C.no_qualifiers, ctype));
+          loaded_addr;
+          mk_expr A.(AilEident param2_sym)
+        ]
+      in
+      let load_call =
+        A.(
+          AilSexpr
+            (mk_expr (AilEcall (mk_expr (AilEident load_fn_sym), load_args))))
+      in
+      ([ loaded_binding ], [ loaded_decl; load_call ], A.AilEident loaded_sym))
+  in
+  let return_stmt = A.(AilSreturn (mk_expr (wrap_with_convert_to ~sct value_expr bt))) in
   (* Generating function declaration *)
   let decl =
     ( fn_sym,
@@ -862,10 +891,11 @@ let generate_get_or_put_ownership_function ~without_ownership_checking ctype
         mk_stmt
           A.(
             AilSblock
-              ( generic_c_ptr_bs,
+              ( generic_c_ptr_bs @ load_bs,
                 List.map
                   mk_stmt
-                  (generic_c_ptr_ss @ ownership_fcall_maybe @ [ return_stmt ]) )) ) )
+                  (generic_c_ptr_ss @ ownership_fcall_maybe @ load_ss @ [ return_stmt ])
+              )) ) )
   in
   (decl, def)
 
