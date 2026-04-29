@@ -8,32 +8,35 @@ OCaml inference framework for bi-abductive specification inference in CN/Fulmina
 Takes runtime data (missing ownership addresses + heap dumps) from Phase 1 (C runtime
 in `runtime/libcn/src/cn-executable/bi_abduction.c`) and suggests CN specifications.
 
-Pipeline: **parse → group by function → build memory graph → enumerate qualifiers → compute footprints → disjoint set cover → pretty-print suggestions**.
+Pipeline: **parse → group by function → enumerate qualifiers → run a generated C harness for predicate footprints → disjoint set cover → pretty-print suggestions**.
 
 Entry points:
 - Push-button CLI: `bin/bi_abd_infer.ml` (`cn bi-abd file.c` — instruments, compiles, runs, infers)
-- Library: `Bi_abduction.Infer.infer_from_files` (just the inference, given pre-collected data)
+- Library: `Bi_abduction.Infer.infer` (takes a `harness_ctx` plus pre-collected data)
 
 ## Module map
 
 | Module | Role |
 |---|---|
 | `data_point.ml` | Parse `cn_abd_summary.json` (lightweight: missing addrs + var bindings) and `cn_abd_heap.jsonl` (raw memory words). Types: `var_binding`, `missing_entry`, `data_point`, `heap_dump`. |
-| `memory_graph.ml` | Build a directed graph from heap data. Nodes = addresses, edges = struct field offsets or pointer dereferences. BFS from anchors (function args) through pointer-sized fields to discover linked structures. |
 | `qualifier.ml` | Thin wrapper around `Request.t`. A qualifier = a candidate `take _ = ...` binding. Uses CN's existing `Request.t`, `IndexTerms.t`, `Sctypes.t` — no parallel type hierarchy. |
-| `enumerator.ml` | Generate candidate qualifiers from the current function scope: exact `Owned<T>(arg)` for pointer args, plus recursive predicate candidates rooted at arguments whose pointee type matches the predicate's root cell and whose concrete address connects to missing bytes. Pointer iargs may reuse in-scope pointers or `NULL`. |
-| `footprint.ml` | Compute which byte-addresses a qualifier covers. `Owned` → `[base, base+size)`. Predicates → `reachable_struct_bytes` from the memory graph. |
+| `enumerator.ml` | Generate candidate qualifiers naively from the current function scope: `Owned<T>(arg)` for pointer args, plus every well-typed predicate application rooted at a pointer arg with iargs drawn from in-scope args and small constants. No heap-shape filtering — wrong candidates are rejected by the harness. |
+| `fp_codegen.ml` | Emit a self-contained C harness (`bi_abd_fp_<func>.c`) that runs each predicate qualifier in PRE mode against a recorded heap. Reuses Fulminate.Internal helpers for predicate / struct / record / conversion / ownership C codegen. |
+| `fp_runner.ml` | Drive the harness end to end: write the .c, invoke `cc` to compile + link against `libcn_exec.a`, run, parse the JSON output. |
+| `fp_table.ml` | Typed lookup `(qualifier_idx) → Int64Set.t option`, populated from the harness's JSON. |
+| `footprint.ml` | Compute byte-addresses a qualifier covers. `Owned` → `[base, base+size)` analytically. Predicates return `None` here; the inference layer combines this with `Fp_table` lookups. |
 | `cover.ml` | Greedy disjoint cover: pick a small qualifier subset covering as many missing bytes as possible without overlapping footprints. |
-| `infer.ml` | Top-level orchestrator. Picks best representative data point, wires everything together, formats output. |
+| `infer.ml` | Top-level orchestrator. Picks best representative data point, wires everything together, runs the harness once per function, formats output. |
 
 ## Key design decisions
 
 - **Reuse CN types** — qualifiers are `Request.t`, terms are `IndexTerms.t`. No separate AST.
-- **Byte-level granularity** — the runtime records missing addresses per-byte. Footprints must also be per-byte. `owned_footprint` strides by 1, not 8.
-- **BFS graph expansion** — the memory graph follows pointer chains through intermediate nodes (e.g. n2 in `p→n1→n2→n3`) that aren't themselves missing. Without this, linked structure inference doesn't work.
+- **Byte-level granularity** — the runtime records missing addresses per-byte. Footprints must also be per-byte.
+- **Predicate footprints come from real CN semantics** — each candidate predicate is generated to a C function via Fulminate, then run in PRE mode. The set of byte addresses claimed in the ghost state at the predicate's depth is the footprint. Wrong candidates self-eject via `cn_failure` (assertion violations, ownership mismatches, NULL dereference).
+- **Cross-platform memory access via `cn_load_hook`** — the harness installs a hook that redirects each predicate-body dereference (the `*ptr` inside the generated `owned_T`) into the recorded heap dump, instead of mmapping fixed addresses. Default behaviour (hook == NULL) is byte-equivalent to `*p`, so non-bi-abd builds are unaffected.
+- **Failure escape via `cn_failure_callback` + `sigsetjmp`** — the harness installs a callback that `siglongjmp`s out, so a wrong qualifier maps cleanly to `footprint = None` instead of crashing the process. No SIGSEGV path.
 - **Representative execution baseline** — inference currently works from one representative data point, chosen as the call with the richest missing set. Multi-run generalisation is intentionally left to `TODO.md`.
-- **Struct byte expansion** — `reachable_struct_bytes` expands struct base addresses to full `[base, base+struct_total_size)` byte ranges. This bridges the gap between graph-level nodes and byte-level missing sets.
-- **Root-type filtering** — a recursive predicate is only considered at an argument whose pointee type matches the predicate's first owned root cell. This avoids suggestions like `IntList(b)` when `b` is really a wrapper struct pointer.
+- **Naive enumeration, semantic filtering** — the enumerator emits every well-typed candidate (no heap-shape heuristics, no root-type matching). The harness is the filter: candidates whose predicate body the observed memory cannot satisfy simply produce `None`.
 
 ## CN/Cerberus conventions to know
 
