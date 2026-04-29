@@ -188,13 +188,24 @@ enum cn_failure_mode {
   CN_FAILURE_OWNERSHIP_LEAK,
   CN_FAILURE_FULM_ALLOC,
   CN_FAILURE_USER_ALLOC,
-  CN_FAILURE_GHOST_ARGS
+  CN_FAILURE_GHOST_ARGS,
+  CN_FAILURE_HEAP_MISS
 };
 
 typedef void (*cn_failure_callback)(enum cn_failure_mode, enum spec_mode);
 void set_cn_failure_cb(cn_failure_callback callback);
 void reset_cn_failure_cb(void);
 void cn_failure(enum cn_failure_mode failure_mode, enum spec_mode spec_mode);
+
+/* Optional load hook used by bi-abductive footprint mode.  When [cn_load_hook]
+   is non-NULL, predicate-body dereferences (via [cn_owned_load]) consult the
+   hook instead of touching memory directly.  The hook returns true on success
+   (filling [dst]); returning false indicates a miss and triggers
+   [cn_failure(CN_FAILURE_HEAP_MISS, ...)].  Default behaviour (hook == NULL)
+   is byte-equivalent to [memcpy(dst, p, sz)] / [*p]. */
+typedef _Bool (*cn_load_hook_t)(const void* p, size_t sz, void* dst);
+extern cn_load_hook_t cn_load_hook;
+void cn_owned_load(const void* p, size_t sz, void* dst, enum spec_mode spec_mode);
 
 /* Conversion functions */
 
