@@ -1,13 +1,14 @@
 (** Top-level inference orchestrator.
 
     Pipeline: parse summary + heap → group by function → for each function:
-    build memory graph → enumerate qualifiers → compute footprints →
-    run cover algorithm → format as CN annotation suggestions.
+    enumerate qualifiers → compute footprints (Owned analytically; predicates
+    via a generated C harness, not yet wired in) → run cover algorithm →
+    format as CN annotation suggestions.
 
     Debug output via [Pp.debug]:
     - Level 2: pipeline stages
     - Level 3: data point details, representative selection
-    - Level 4: graph stats, enumeration results
+    - Level 4: enumeration results
     - Level 5: per-qualifier footprints, cover steps *)
 
 module StdList = Stdlib.List
@@ -23,44 +24,11 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
-(** Build struct layouts from struct definitions.
-    Maps struct tag → list of (field_id, byte_offset, byte_size). *)
-let build_struct_layouts (struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-  : (Id.t * int * int) list Sym.Map.t
-  =
-  Sym.Map.map
-    (fun fields ->
-       let _, rev_layout =
-         StdList.fold_left
-           (fun (running_offset, acc) (field_id, field_ct) ->
-              let size = Memory.size_of_ctype field_ct in
-              let align = Memory.align_of_ctype field_ct in
-              let aligned_offset =
-                if align > 0 then (
-                  let rem = running_offset mod align in
-                  if rem = 0 then
-                    running_offset
-                  else
-                    running_offset + (align - rem))
-                else
-                  running_offset
-              in
-              (aligned_offset + size, (field_id, aligned_offset, size) :: acc))
-           (0, [])
-           fields
-       in
-       StdList.rev rev_layout)
-    struct_defs
-
-
 (** Run the inference pipeline for one function. *)
 let infer_function
       ~(config : Enumerator.config)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
-      ~(pre_heap_lookup : int64 -> int64 option)
-      ~(post_heap_lookup : int64 -> int64 option)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -69,13 +37,6 @@ let infer_function
   Pp.debug 2 (lazy (headline ("bi-abd: inferring specs for " ^ func_name)));
   Pp.debug 3 (lazy (item "data points" (Pp.int (StdList.length dps))));
   let loc = Locations.other __FUNCTION__ in
-  let struct_layouts = build_struct_layouts struct_defs in
-  Pp.debug
-    4
-    (lazy
-      (item
-         "struct layouts"
-         (Pp.int (Sym.Map.cardinal struct_layouts) ^^^ !^"struct types")));
   (* Baseline mode: infer from one representative execution only.
      This keeps the concrete story simple and avoids mixing incompatible heap
      addresses from distinct runs. Generalising across executions is left to
@@ -130,58 +91,28 @@ let infer_function
            func_name
            (Pp.plain (Sctypes.pp ct)))
   in
-  (* Extract function arguments with actual pointee types when available. *)
   let args = StdList.map arg_of_var representative_dp.pre_vars in
-  (* Build variable name → address mapping for predicate connectivity check *)
-  let var_addrs =
-    StdList.map
-      (fun (v : Data_point.var_binding) -> (v.name, v.value))
-      representative_dp.Data_point.pre_vars
-  in
+  let candidates_raw = Enumerator.enumerate ~config ~args ~pred_defs ~loc in
+  Pp.debug
+    4
+    (lazy
+      (item
+         "candidates (raw)"
+         (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
+  StdList.iter
+    (fun q -> Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
+    candidates_raw;
   (* Run the pipeline for a single phase. pre and post differ only in which
-     heap snapshot, missing-entry field, and phase label they use:
-     - Pre:  H_entry snapshot, body_missing    (body auto-grants = pre needs)
-     - Post: H_exit  snapshot, post_remaining  (leak check remainder = post) *)
+     missing-entry field is the must-cover set:
+     - Pre:  body_missing    (body auto-grants = pre needs)
+     - Post: post_remaining  (leak check remainder = post) *)
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
-    let phase_label, heap_lookup, select_missing =
+    let phase_label, select_missing =
       match phase with
-      | `Pre ->
-        ("pre", pre_heap_lookup, fun (dp : Data_point.data_point) -> dp.body_missing)
-      | `Post ->
-        ("post", post_heap_lookup, fun (dp : Data_point.data_point) -> dp.post_remaining)
+      | `Pre -> ("pre", fun (dp : Data_point.data_point) -> dp.body_missing)
+      | `Post -> ("post", fun (dp : Data_point.data_point) -> dp.post_remaining)
     in
-    let missing_set = Data_point.missing_addr_set (select_missing representative_dp) in
-    let graph =
-      Memory_graph.build
-        ~pre_vars:representative_dp.pre_vars
-        ~missing_set
-        ~heap_lookup
-        ~struct_layouts
-    in
-    Pp.debug
-      4
-      (lazy
-        (item
-           (phase_label ^ " memory graph")
-           !^(Printf.sprintf
-                "%d nodes, %d anchors, %d missing"
-                (Memory_graph.Int64Map.cardinal (Memory_graph.info graph))
-                (Int64Set.cardinal (Memory_graph.anchors graph))
-                (Int64Set.cardinal (Memory_graph.missing graph)))));
-    let must_cover = missing_set in
-    let candidates_raw =
-      Enumerator.enumerate ~config ~args ~pred_defs ~graph ~var_addrs ~loc
-    in
-    Pp.debug
-      4
-      (lazy
-        (item
-           (phase_label ^ " candidates (raw)")
-           (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
-    StdList.iter
-      (fun q ->
-         Pp.debug 5 (lazy (item ("  " ^ phase_label ^ " candidate") (Qualifier.pp q))))
-      candidates_raw;
+    let must_cover = Data_point.missing_addr_set (select_missing representative_dp) in
     Pp.debug
       3
       (lazy
@@ -191,9 +122,7 @@ let infer_function
     let candidates =
       StdList.filter_map
         (fun q ->
-           match
-             Footprint.compute_with_graph q representative_dp graph ~struct_layouts
-           with
+           match Footprint.compute q representative_dp with
            | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
              let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
              Pp.debug
@@ -244,8 +173,6 @@ let infer_function
 let infer
       ~(config : Enumerator.config)
       ~(execution_data : Data_point.execution_data)
-      ~(pre_heap_lookup : int64 -> int64 option)
-      ~(post_heap_lookup : int64 -> int64 option)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
@@ -285,15 +212,7 @@ let infer
          None
        | Some signature_args ->
          Some
-           (infer_function
-              ~config
-              ~pred_defs
-              ~struct_defs
-              ~signature_args
-              ~pre_heap_lookup
-              ~post_heap_lookup
-              ~func_name
-              ~dps))
+           (infer_function ~config ~pred_defs ~signature_args ~func_name ~dps))
     grouped
 
 
@@ -353,13 +272,6 @@ let infer_from_files
                "pre:%d post:%d"
                (StdList.length pre_dumps)
                (StdList.length post_dumps)))));
-  let pre_heap_lookup = Data_point.heap_lookup pre_dumps in
-  let post_heap_lookup = Data_point.heap_lookup post_dumps in
-  infer
-    ~config
-    ~execution_data
-    ~pre_heap_lookup
-    ~post_heap_lookup
-    ~pred_defs
-    ~struct_defs
-    ~function_args
+  ignore pre_dumps;
+  ignore post_dumps;
+  infer ~config ~execution_data ~pred_defs ~struct_defs ~function_args
