@@ -50,7 +50,8 @@ let infer_function
       ~(harness : harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
-      ~(heap_words : (int64 * int64) list)
+      ~(pre_heap_words : (int64 * int64) list)
+      ~(post_heap_words : (int64 * int64) list)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -131,7 +132,7 @@ let infer_function
       (item
          "predicate qualifiers"
          (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
-  let fp_table =
+  let run_harness ~tag ~heap_words : Fp_table.t =
     if StdList.length pred_qualifiers = 0 then
       Fp_table.empty
     else (
@@ -152,9 +153,12 @@ let infer_function
         ~output_dir:harness.output_dir
         ~cn_runtime_prefix:harness.cn_runtime_prefix
         ~func_name
+        ~tag
         codegen_input)
   in
-  let footprint_of (q_idx, q) : Int64Set.t option =
+  let pre_fp_table = run_harness ~tag:"pre" ~heap_words:pre_heap_words in
+  let post_fp_table = run_harness ~tag:"post" ~heap_words:post_heap_words in
+  let footprint_of ~(fp_table : Fp_table.t) (q_idx, q) : Int64Set.t option =
     match q with
     | Request.P { name = Owned _; _ } -> Footprint.compute q representative_dp
     | Request.P { name = PName _; _ } ->
@@ -164,10 +168,14 @@ let infer_function
     | _ -> None
   in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
-    let phase_label, select_missing =
+    let phase_label, select_missing, fp_table =
       match phase with
-      | `Pre -> ("pre", fun (dp : Data_point.data_point) -> dp.body_missing)
-      | `Post -> ("post", fun (dp : Data_point.data_point) -> dp.post_remaining)
+      | `Pre ->
+        ("pre", (fun (dp : Data_point.data_point) -> dp.body_missing), pre_fp_table)
+      | `Post ->
+        ( "post",
+          (fun (dp : Data_point.data_point) -> dp.post_remaining),
+          post_fp_table )
     in
     let must_cover = Data_point.missing_addr_set (select_missing representative_dp) in
     Pp.debug
@@ -179,7 +187,7 @@ let infer_function
     let candidates =
       StdList.filter_map
         (fun (q_idx, q) ->
-           match footprint_of (q_idx, q) with
+           match footprint_of ~fp_table (q_idx, q) with
            | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
              let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
              Pp.debug
@@ -253,11 +261,14 @@ let infer
                "pre:%d post:%d"
                (StdList.length pre_dumps)
                (StdList.length post_dumps)))));
-  (* For now we run the harness against the pre-state heap.  Read-only
-     traversals (the common case) make pre and post heaps identical, and
-     using one snapshot keeps both phases working off a single cached
-     footprint table.  Splitting per phase is a TODO. *)
-  let heap_words = Data_point.flatten_heap_dumps pre_dumps in
+  (* Run the harness once per phase against its matching heap snapshot:
+     [pre_heap_words] for the body_missing (precondition) phase,
+     [post_heap_words] for the post_remaining (postcondition) phase.
+     For functions that mutate the heap (e.g. constructors, setters)
+     these snapshots differ, so reusing one for both phases would either
+     reject or mis-shape the postcondition predicates. *)
+  let pre_heap_words = Data_point.flatten_heap_dumps pre_dumps in
+  let post_heap_words = Data_point.flatten_heap_dumps post_dumps in
   Pp.debug
     2
     (lazy
@@ -295,7 +306,8 @@ let infer
               ~harness
               ~pred_defs
               ~signature_args
-              ~heap_words
+              ~pre_heap_words
+              ~post_heap_words
               ~func_name
               ~dps))
     grouped

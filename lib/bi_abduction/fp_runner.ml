@@ -55,16 +55,18 @@ let run
       ~(output_dir : string)
       ~(cn_runtime_prefix : string)
       ~(func_name : string)
+      ~(tag : string)
       (input : Fp_codegen.input)
   : Fp_table.t
   =
   let safe_func =
     Stdlib.String.map (fun c -> if Char.equal c '/' then '_' else c) func_name
   in
-  let src_path = Filename.concat output_dir ("bi_abd_fp_" ^ safe_func ^ ".c") in
-  let obj_path = Filename.concat output_dir ("bi_abd_fp_" ^ safe_func ^ ".o") in
-  let exe_path = Filename.concat output_dir ("bi_abd_fp_" ^ safe_func ^ ".out") in
-  let json_path = Filename.concat output_dir ("bi_abd_fp_" ^ safe_func ^ ".json") in
+  let stem = Printf.sprintf "bi_abd_fp_%s_%s" safe_func tag in
+  let src_path = Filename.concat output_dir (stem ^ ".c") in
+  let obj_path = Filename.concat output_dir (stem ^ ".o") in
+  let exe_path = Filename.concat output_dir (stem ^ ".out") in
+  let json_path = Filename.concat output_dir (stem ^ ".json") in
   let input = { input with output_json_path = json_path } in
   let src = Fp_codegen.emit input in
   let oc = open_out src_path in
