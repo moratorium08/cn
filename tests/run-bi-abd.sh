@@ -80,7 +80,7 @@ expectations_for() {
     extra_predicate_body_ignored.c)
       printf '%s\n' \
         '/* Function: list_length */' \
-        'take _ = NegList(p);'
+        '/* inference failed */'
       ;;
     extra_scalar_pointer_missing.c)
       printf '%s\n' \

@@ -1,16 +1,20 @@
 (** Top-level inference orchestrator.
 
     Pipeline: parse summary + heap → group by function → for each function:
-    enumerate qualifiers → compute footprints (Owned analytically; predicates
-    via a generated C harness, not yet wired in) → run cover algorithm →
-    format as CN annotation suggestions.
+    enumerate qualifiers → run the predicate-footprint harness → compute
+    cover → format suggestions.
+
+    Owned qualifiers get analytical footprints from [Footprint.owned_footprint].
+    Predicate qualifiers get their footprints from a generated C harness
+    ([Fp_codegen]) compiled and run by [Fp_runner].
 
     Debug output via [Pp.debug]:
     - Level 2: pipeline stages
     - Level 3: data point details, representative selection
-    - Level 4: enumeration results
+    - Level 4: enumeration / harness results
     - Level 5: per-qualifier footprints, cover steps *)
 
+module CF = Cerb_frontend
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
 
@@ -24,11 +28,29 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
+type harness_ctx =
+  { cc : string;
+    output_dir : string;
+    cn_runtime_prefix : string;
+    filename : string;
+    cabs_tunit : CF.Cabs.translation_unit;
+    ail_prog : CF.GenTypes.genTypeCategory CF.AilSyntax.sigma;
+    prog5 : unit Mucore.file
+  }
+
+let is_predicate_qualifier (q : Qualifier.t) : bool =
+  match q with
+  | Request.P { name = PName _; _ } -> true
+  | _ -> false
+
+
 (** Run the inference pipeline for one function. *)
 let infer_function
       ~(config : Enumerator.config)
+      ~(harness : harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
+      ~(heap_words : (int64 * int64) list)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -37,10 +59,7 @@ let infer_function
   Pp.debug 2 (lazy (headline ("bi-abd: inferring specs for " ^ func_name)));
   Pp.debug 3 (lazy (item "data points" (Pp.int (StdList.length dps))));
   let loc = Locations.other __FUNCTION__ in
-  (* Baseline mode: infer from one representative execution only.
-     This keeps the concrete story simple and avoids mixing incompatible heap
-     addresses from distinct runs. Generalising across executions is left to
-     the TODO path. *)
+  (* Baseline: pick the dp with the richest missing set as the representative. *)
   let representative_dp =
     StdList.fold_left
       (fun best (dp : Data_point.data_point) ->
@@ -102,10 +121,48 @@ let infer_function
   StdList.iter
     (fun q -> Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
     candidates_raw;
-  (* Run the pipeline for a single phase. pre and post differ only in which
-     missing-entry field is the must-cover set:
-     - Pre:  body_missing    (body auto-grants = pre needs)
-     - Post: post_remaining  (leak check remainder = post) *)
+  let candidates_indexed = StdList.mapi (fun i q -> (i, q)) candidates_raw in
+  let pred_qualifiers =
+    StdList.filter (fun (_, q) -> is_predicate_qualifier q) candidates_indexed
+  in
+  Pp.debug
+    4
+    (lazy
+      (item
+         "predicate qualifiers"
+         (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
+  let fp_table =
+    if StdList.length pred_qualifiers = 0 then
+      Fp_table.empty
+    else (
+      let codegen_input : Fp_codegen.input =
+        { filename = harness.filename;
+          cabs_tunit = harness.cabs_tunit;
+          ail_prog = harness.ail_prog;
+          prog5 = harness.prog5;
+          pred_defs;
+          representative_dp;
+          heap_words;
+          qualifiers = pred_qualifiers;
+          output_json_path = "" (* set inside Fp_runner.run *)
+        }
+      in
+      Fp_runner.run
+        ~cc:harness.cc
+        ~output_dir:harness.output_dir
+        ~cn_runtime_prefix:harness.cn_runtime_prefix
+        ~func_name
+        codegen_input)
+  in
+  let footprint_of (q_idx, q) : Int64Set.t option =
+    match q with
+    | Request.P { name = Owned _; _ } -> Footprint.compute q representative_dp
+    | Request.P { name = PName _; _ } ->
+      (match Fp_table.find fp_table q_idx with
+       | Some fp -> fp
+       | None -> None)
+    | _ -> None
+  in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
     let phase_label, select_missing =
       match phase with
@@ -121,8 +178,8 @@ let infer_function
            (Pp.int (Int64Set.cardinal must_cover) ^^^ !^"bytes")));
     let candidates =
       StdList.filter_map
-        (fun q ->
-           match Footprint.compute q representative_dp with
+        (fun (q_idx, q) ->
+           match footprint_of (q_idx, q) with
            | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
              let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
              Pp.debug
@@ -138,7 +195,7 @@ let infer_function
                      ^^^ !^"covering must")));
              Some { Cover.qualifier = q; footprint = fp }
            | _ -> None)
-        candidates_raw
+        candidates_indexed
     in
     Pp.debug
       4
@@ -169,10 +226,12 @@ let infer_function
   { function_name = func_name; qualifiers }
 
 
-(** Main entry point: run inference on execution data. *)
+(** Main entry: parse the summary + heap files and infer per function. *)
 let infer
       ~(config : Enumerator.config)
-      ~(execution_data : Data_point.execution_data)
+      ~(harness : harness_ctx)
+      ~(summary_file : string)
+      ~(heap_file : string)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
@@ -180,6 +239,25 @@ let infer
   =
   let open Pp in
   Pp.debug 2 (lazy (headline "bi-abd: starting inference"));
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
+  let execution_data = Data_point.parse_summary_json summary_file in
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
+  let pre_dumps, post_dumps = Data_point.parse_heap_jsonl heap_file in
+  Pp.debug
+    3
+    (lazy
+      (Pp.item
+         "heap dumps"
+         (Pp.string
+            (Printf.sprintf
+               "pre:%d post:%d"
+               (StdList.length pre_dumps)
+               (StdList.length post_dumps)))));
+  (* For now we run the harness against the pre-state heap.  Read-only
+     traversals (the common case) make pre and post heaps identical, and
+     using one snapshot keeps both phases working off a single cached
+     footprint table.  Splitting per phase is a TODO. *)
+  let heap_words = Data_point.flatten_heap_dumps pre_dumps in
   Pp.debug
     2
     (lazy
@@ -212,7 +290,14 @@ let infer
          None
        | Some signature_args ->
          Some
-           (infer_function ~config ~pred_defs ~signature_args ~func_name ~dps))
+           (infer_function
+              ~config
+              ~harness
+              ~pred_defs
+              ~signature_args
+              ~heap_words
+              ~func_name
+              ~dps))
     grouped
 
 
@@ -246,32 +331,3 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
          header ^^ pre_doc ^^ post_doc)
     specs
   |> separate (hardline ^^ hardline)
-
-
-(** Run inference from file paths (convenience entry point). *)
-let infer_from_files
-      ~(config : Enumerator.config)
-      ~(summary_file : string)
-      ~(heap_file : string)
-      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-      ~(function_args : (string * (string * Sctypes.t) list) list)
-  : inferred_spec list
-  =
-  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
-  let execution_data = Data_point.parse_summary_json summary_file in
-  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
-  let pre_dumps, post_dumps = Data_point.parse_heap_jsonl heap_file in
-  Pp.debug
-    3
-    (lazy
-      (Pp.item
-         "heap dumps"
-         (Pp.string
-            (Printf.sprintf
-               "pre:%d post:%d"
-               (StdList.length pre_dumps)
-               (StdList.length post_dumps)))));
-  ignore pre_dumps;
-  ignore post_dumps;
-  infer ~config ~execution_data ~pred_defs ~struct_defs ~function_args

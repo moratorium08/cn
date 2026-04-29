@@ -198,3 +198,11 @@ let heap_lookup (dumps : heap_dump list) : int64 -> int64 option =
     (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
     dumps;
   fun addr -> Hashtbl.find_opt tbl addr
+
+
+let flatten_heap_dumps (dumps : heap_dump list) : (int64 * int64) list =
+  let tbl = Hashtbl.create 256 in
+  StdList.iter
+    (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
+    dumps;
+  Hashtbl.fold (fun a v acc -> (a, v) :: acc) tbl []
