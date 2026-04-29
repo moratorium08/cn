@@ -1,0 +1,208 @@
+(** Parsing and representation of bi-abductive execution data.
+    Reads the JSON summary file (.abd.json) and JSONL heap dump (.heap.jsonl)
+    produced by the bi-abductive runtime. *)
+
+(* Restore standard library modules shadowed by CN's library *)
+module StdList = Stdlib.List
+module String = Stdlib.String
+
+type var_binding =
+  { name : string;
+    value : int64;
+    size : int
+  }
+
+type missing_entry =
+  { addr : int64;
+    size : int
+  }
+
+(* TODO(HK): Add a field for capturing `return` values *)
+type data_point =
+  { function_name : string;
+    pre_vars : var_binding list;
+    body_missing : missing_entry list; (* body auto-grants = precondition needs *)
+    post_remaining : missing_entry list (* leak check remainder = postcondition *)
+  }
+
+type execution_data = { data_points : data_point list }
+
+type heap_word =
+  { addr : int64;
+    value : int64
+  }
+
+type heap_dump = { words : heap_word list }
+
+(* --- Parsing helpers --- *)
+
+let parse_hex_int64 s =
+  (* Accept "0x..." or plain decimal *)
+  if String.length s > 2 && String.equal (String.sub s 0 2) "0x" then
+    Int64.of_string s
+  else
+    Int64.of_string s
+
+
+let json_string = function
+  | `String s -> s
+  | j -> failwith ("expected JSON string, got: " ^ Yojson.Safe.to_string j)
+
+
+let json_int = function
+  | `Int n -> n
+  | `Intlit s -> int_of_string s
+  | j -> failwith ("expected JSON int, got: " ^ Yojson.Safe.to_string j)
+
+
+let json_list = function
+  | `List l -> l
+  | j -> failwith ("expected JSON list, got: " ^ Yojson.Safe.to_string j)
+
+
+let json_assoc = function
+  | `Assoc a -> a
+  | j -> failwith ("expected JSON object, got: " ^ Yojson.Safe.to_string j)
+
+
+let json_field key obj =
+  match StdList.assoc_opt key (json_assoc obj) with
+  | Some v -> v
+  | None -> failwith ("missing JSON field: " ^ key)
+
+
+(* --- Var binding parsing --- *)
+
+let parse_var_binding j =
+  { name = json_string (json_field "name" j);
+    value = parse_hex_int64 (json_string (json_field "value" j));
+    size = json_int (json_field "size" j)
+  }
+
+
+(* --- Missing entry parsing --- *)
+
+let parse_missing_entry j =
+  { addr = parse_hex_int64 (json_string (json_field "addr" j));
+    size = json_int (json_field "size" j)
+  }
+
+
+(* --- Data point parsing --- *)
+
+let parse_data_point j =
+  let pre_obj = json_field "pre" j in
+  let pre_vars = json_list (json_field "vars" pre_obj) |> StdList.map parse_var_binding in
+  let body_missing =
+    json_list (json_field "missing" (json_field "body" j))
+    |> StdList.map parse_missing_entry
+  in
+  let post_remaining =
+    json_list (json_field "remaining" (json_field "post" j))
+    |> StdList.map parse_missing_entry
+  in
+  { function_name = json_string (json_field "function" j);
+    pre_vars;
+    body_missing;
+    post_remaining
+  }
+
+
+(* --- Summary file parsing --- *)
+
+let parse_summary_json (filename : string) : execution_data =
+  let json = Yojson.Safe.from_file filename in
+  { data_points =
+      json_list (json_field "data_points" json) |> StdList.map parse_data_point
+  }
+
+
+(* --- Heap dump parsing (JSONL) --- *)
+
+let parse_heap_words_obj j =
+  json_assoc j
+  |> StdList.map (fun (addr_s, val_j) ->
+    { addr = parse_hex_int64 addr_s; value = parse_hex_int64 (json_string val_j) })
+
+
+let parse_heap_dump_line (line : string) : [ `Pre | `Post ] * heap_dump =
+  let j = Yojson.Safe.from_string line in
+  let phase =
+    match StdList.assoc_opt "phase" (json_assoc j) with
+    | Some (`String "post") -> `Post
+    | _ -> `Pre (* "pre", missing, or legacy "body" → Pre *)
+  in
+  let dump = { words = parse_heap_words_obj (json_field "words" j) } in
+  (phase, dump)
+
+
+(** Parse a heap JSONL file and return (pre_dumps, post_dumps) split by phase. *)
+let parse_heap_jsonl (filename : string) : heap_dump list * heap_dump list =
+  let ic = open_in filename in
+  let rec read_lines pre post =
+    match input_line ic with
+    | line ->
+      let line = String.trim line in
+      if String.length line = 0 then
+        read_lines pre post
+      else (
+        let phase, dump = parse_heap_dump_line line in
+        match phase with
+        | `Pre -> read_lines (dump :: pre) post
+        | `Post -> read_lines pre (dump :: post))
+    | exception End_of_file -> (StdList.rev pre, StdList.rev post)
+  in
+  Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_lines [] [])
+
+
+(* --- Grouping --- *)
+
+let group_by_function (dps : data_point list) : (string * data_point list) list =
+  let tbl : (string, data_point list) Hashtbl.t = Hashtbl.create 16 in
+  StdList.iter
+    (fun (dp : data_point) ->
+       let existing : data_point list =
+         match Hashtbl.find_opt tbl dp.function_name with Some l -> l | None -> []
+       in
+       Hashtbl.replace tbl dp.function_name (dp :: existing))
+    dps;
+  Hashtbl.fold
+    (fun name (points : data_point list) acc -> (name, StdList.rev points) :: acc)
+    tbl
+    []
+
+
+(* --- Address set helpers --- *)
+
+module Int64Set = Set.Make (Int64)
+
+let missing_addr_set (entries : missing_entry list) : Int64Set.t =
+  StdList.fold_left
+    (fun acc (e : missing_entry) ->
+       let rec add_range set offset =
+         if offset >= e.size then
+           set
+         else (
+           let a = Int64.add e.addr (Int64.of_int offset) in
+           add_range (Int64Set.add a set) (offset + 1))
+       in
+       add_range acc 0)
+    Int64Set.empty
+    entries
+
+
+(* Build a lookup function from heap dumps: addr -> value option *)
+let heap_lookup (dumps : heap_dump list) : int64 -> int64 option =
+  let tbl = Hashtbl.create 256 in
+  StdList.iter
+    (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
+    dumps;
+  fun addr -> Hashtbl.find_opt tbl addr
+
+
+let flatten_heap_dumps (dumps : heap_dump list) : (int64 * int64) list =
+  let tbl = Hashtbl.create 256 in
+  StdList.iter
+    (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
+    dumps;
+  Hashtbl.fold (fun a v acc -> (a, v) :: acc) tbl []

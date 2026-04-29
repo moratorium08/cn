@@ -81,6 +81,7 @@ let run_seq_tests
              ~experimental_ownership_stack_mode
              ~experimental_curly_braces:false
              ~with_testing:true
+             ~bi_abductive:false
              ~skip_and_only:([], [])
              filename
              cc
