@@ -132,6 +132,10 @@ let infer_function
       (item
          "predicate qualifiers"
          (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
+  (* Today the harness sweeps over a singleton [dp_entry] (the
+     representative dp).  Adding more dps here is a pure data change
+     — the codegen and lookup are already keyed on dp_idx. *)
+  let representative_dp_idx = 0 in
   let run_harness ~tag ~heap_words : Fp_table.t =
     if StdList.length pred_qualifiers = 0 then
       Fp_table.empty
@@ -142,8 +146,12 @@ let infer_function
           ail_prog = harness.ail_prog;
           prog5 = harness.prog5;
           pred_defs;
-          representative_dp;
-          heap_words;
+          data_points =
+            [ { dp_idx = representative_dp_idx;
+                dp = representative_dp;
+                heap_words
+              }
+            ];
           qualifiers = pred_qualifiers;
           output_json_path = "" (* set inside Fp_runner.run *)
         }
@@ -162,7 +170,7 @@ let infer_function
     match q with
     | Request.P { name = Owned _; _ } -> Footprint.compute q representative_dp
     | Request.P { name = PName _; _ } ->
-      (match Fp_table.find fp_table q_idx with
+      (match Fp_table.find fp_table (q_idx, representative_dp_idx) with
        | Some fp -> fp
        | None -> None)
     | _ -> None

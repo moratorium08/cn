@@ -9,7 +9,7 @@ let read_whole_file path : string =
   s
 
 
-let parse_results_json (path : string) : (int * Int64Set.t option) list =
+let parse_results_json (path : string) : (int * int * Int64Set.t option) list =
   let json = Yojson.Safe.from_file path in
   let results =
     match json with
@@ -23,11 +23,14 @@ let parse_results_json (path : string) : (int * Int64Set.t option) list =
     (fun entry ->
        match entry with
        | `Assoc fields ->
-         let q_idx =
-           match StdList.assoc_opt "q" fields with
+         let int_field name =
+           match StdList.assoc_opt name fields with
            | Some (`Int n) -> n
-           | _ -> failwith "fp_runner: entry missing integer 'q'"
+           | _ ->
+             failwith (Printf.sprintf "fp_runner: entry missing integer '%s'" name)
          in
+         let q_idx = int_field "q" in
+         let dp_idx = int_field "dp" in
          let addrs =
            match StdList.assoc_opt "addrs" fields with
            | Some `Null -> None
@@ -45,7 +48,7 @@ let parse_results_json (path : string) : (int * Int64Set.t option) list =
              Some set
            | _ -> failwith "fp_runner: entry missing 'addrs'"
          in
-         (q_idx, addrs)
+         (q_idx, dp_idx, addrs)
        | _ -> failwith "fp_runner: result entry is not an object")
     results
 
