@@ -238,7 +238,7 @@ let generate_bi_abd
         Printf.printf "Running inference...\n%!";
         let config = Bi_abduction.Enumerator.default_config in
         let cn_runtime_prefix = resolve_cn_runtime_prefix () in
-        let harness : Bi_abduction.Infer.harness_ctx =
+        let harness : Bi_abduction.Footprint.harness_ctx =
           { cc;
             output_dir;
             cn_runtime_prefix;

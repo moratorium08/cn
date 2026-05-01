@@ -14,7 +14,6 @@
     - Level 4: enumeration / harness results
     - Level 5: per-qualifier footprints, cover steps *)
 
-module CF = Cerb_frontend
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
 
@@ -28,16 +27,6 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
-type harness_ctx =
-  { cc : string;
-    output_dir : string;
-    cn_runtime_prefix : string;
-    filename : string;
-    cabs_tunit : CF.Cabs.translation_unit;
-    ail_prog : CF.GenTypes.genTypeCategory CF.AilSyntax.sigma;
-    prog5 : unit Mucore.file
-  }
-
 let is_predicate_qualifier (q : Qualifier.t) : bool =
   match q with
   | Request.P { name = PName _; _ } -> true
@@ -47,7 +36,7 @@ let is_predicate_qualifier (q : Qualifier.t) : bool =
 (** Run the inference pipeline for one function. *)
 let infer_function
       ~(config : Enumerator.config)
-      ~(harness : harness_ctx)
+      ~(harness : Footprint.harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
       ~(pre_heap_words : (int64 * int64) list)
@@ -137,43 +126,22 @@ let infer_function
      — the codegen and lookup are already keyed on dp_idx. *)
   let representative_dp_idx = 0 in
   let run_harness ~tag ~heap_words : Fp_table.t =
-    if StdList.length pred_qualifiers = 0 then
-      Fp_table.empty
-    else (
-      let codegen_input : Fp_codegen.input =
-        { filename = harness.filename;
-          cabs_tunit = harness.cabs_tunit;
-          ail_prog = harness.ail_prog;
-          prog5 = harness.prog5;
-          pred_defs;
-          data_points =
-            [ { dp_idx = representative_dp_idx;
-                dp = representative_dp;
-                heap_words
-              }
-            ];
-          qualifiers = pred_qualifiers;
-          output_json_path = "" (* set inside Fp_runner.run *)
-        }
-      in
-      Fp_runner.run
-        ~cc:harness.cc
-        ~output_dir:harness.output_dir
-        ~cn_runtime_prefix:harness.cn_runtime_prefix
-        ~func_name
-        ~tag
-        codegen_input)
+    Footprint.compute_predicate_table
+      ~harness
+      ~tag
+      ~func_name
+      ~pred_defs
+      ~data_points:[ { dp_idx = representative_dp_idx; dp = representative_dp; heap_words } ]
+      ~qualifiers:pred_qualifiers
   in
   let pre_fp_table = run_harness ~tag:"pre" ~heap_words:pre_heap_words in
   let post_fp_table = run_harness ~tag:"post" ~heap_words:post_heap_words in
   let footprint_of ~(fp_table : Fp_table.t) (q_idx, q) : Int64Set.t option =
-    match q with
-    | Request.P { name = Owned _; _ } -> Footprint.compute q representative_dp
-    | Request.P { name = PName _; _ } ->
-      (match Fp_table.find fp_table (q_idx, representative_dp_idx) with
-       | Some fp -> fp
-       | None -> None)
-    | _ -> None
+    Footprint.lookup
+      ~representative_dp
+      ~representative_dp_idx
+      ~fp_table
+      (q_idx, q)
   in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
     let phase_label, select_missing, fp_table =
@@ -245,7 +213,7 @@ let infer_function
 (** Main entry: parse the summary + heap files and infer per function. *)
 let infer
       ~(config : Enumerator.config)
-      ~(harness : harness_ctx)
+      ~(harness : Footprint.harness_ctx)
       ~(summary_file : string)
       ~(heap_file : string)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)

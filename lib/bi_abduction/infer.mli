@@ -1,7 +1,5 @@
 (** Top-level inference orchestrator. *)
 
-module CF = Cerb_frontend
-
 type inferred_qualifiers =
   { pre : Qualifier.t list;
     post : Qualifier.t list
@@ -12,22 +10,9 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
-(** Context the inference pipeline needs to drive the predicate-footprint
-    harness: a C compiler, an output directory, the runtime layout, and
-    the parsed program inputs from cerberus / fulminate. *)
-type harness_ctx =
-  { cc : string;
-    output_dir : string;
-    cn_runtime_prefix : string;
-    filename : string;
-    cabs_tunit : CF.Cabs.translation_unit;
-    ail_prog : CF.GenTypes.genTypeCategory CF.AilSyntax.sigma;
-    prog5 : unit Mucore.file
-  }
-
 val infer
   :  config:Enumerator.config ->
-  harness:harness_ctx ->
+  harness:Footprint.harness_ctx ->
   summary_file:string ->
   heap_file:string ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->

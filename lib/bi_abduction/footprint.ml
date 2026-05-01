@@ -2,11 +2,28 @@
 
     Owned qualifiers resolve to a contiguous byte range purely from the
     pointer's value in the data point.  Predicate qualifiers are computed by
-    a generated C harness (see [Fp_codegen] / [Fp_runner]); this module
-    intentionally does not know how to compute them on its own. *)
+    a generated C harness (see [Fp_codegen] / [Fp_runner]) that executes
+    their Fulminate semantics against recorded heap snapshots. *)
 
 module StdList = Stdlib.List
+module CF = Cerb_frontend
 module Int64Set = Data_point.Int64Set
+
+type harness_ctx =
+  { cc : string;
+    output_dir : string;
+    cn_runtime_prefix : string;
+    filename : string;
+    cabs_tunit : CF.Cabs.translation_unit;
+    ail_prog : CF.GenTypes.genTypeCategory CF.AilSyntax.sigma;
+    prog5 : unit Mucore.file
+  }
+
+type harness_data_point =
+  { dp_idx : int;
+    dp : Data_point.data_point;
+    heap_words : (int64 * int64) list
+  }
 
 (** Compute the footprint of an Owned<ct>(ptr) qualifier at a concrete address. *)
 let owned_footprint ~(ct : Sctypes.t) ~(base_addr : int64) : Int64Set.t =
@@ -54,3 +71,57 @@ let compute_batch (qualifiers : Qualifier.t list) (dp : Data_point.data_point)
   : (Qualifier.t * Int64Set.t option) list
   =
   StdList.map (fun q -> (q, compute q dp)) qualifiers
+
+
+let compute_predicate_table
+      ~(harness : harness_ctx)
+      ~(tag : string)
+      ~(func_name : string)
+      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      ~(data_points : harness_data_point list)
+      ~(qualifiers : (int * Qualifier.t) list)
+  : Fp_table.t
+  =
+  match qualifiers with
+  | [] -> Fp_table.empty
+  | _ ->
+    let data_points =
+      StdList.map
+        (fun (dp : harness_data_point) : Fp_codegen.dp_entry ->
+           { dp_idx = dp.dp_idx; dp = dp.dp; heap_words = dp.heap_words })
+        data_points
+    in
+    let codegen_input : Fp_codegen.input =
+      { filename = harness.filename;
+        cabs_tunit = harness.cabs_tunit;
+        ail_prog = harness.ail_prog;
+        prog5 = harness.prog5;
+        pred_defs;
+        data_points;
+        qualifiers;
+        output_json_path = "" (* set inside Fp_runner.run *)
+      }
+    in
+    Fp_runner.run
+      ~cc:harness.cc
+      ~output_dir:harness.output_dir
+      ~cn_runtime_prefix:harness.cn_runtime_prefix
+      ~func_name
+      ~tag
+      codegen_input
+
+
+let lookup
+      ~(representative_dp : Data_point.data_point)
+      ~(representative_dp_idx : int)
+      ~(fp_table : Fp_table.t)
+      ((q_idx, q) : int * Qualifier.t)
+  : Int64Set.t option
+  =
+  match q with
+  | Request.P { name = Owned _; _ } -> compute q representative_dp
+  | Request.P { name = PName _; _ } ->
+    (match Fp_table.find fp_table (q_idx, representative_dp_idx) with
+     | Some fp -> fp
+     | None -> None)
+  | _ -> None
