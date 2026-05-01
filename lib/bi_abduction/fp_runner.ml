@@ -1,4 +1,5 @@
 module StdList = Stdlib.List
+module CF = Cerb_frontend
 module Int64Set = Data_point.Int64Set
 
 let read_whole_file path : string =
@@ -59,7 +60,13 @@ let run
       ~(cn_runtime_prefix : string)
       ~(func_name : string)
       ~(tag : string)
-      (input : Fp_codegen.input)
+      ~(filename : string)
+      ~(cabs_tunit : CF.Cabs.translation_unit)
+      ~(ail_prog : CF.GenTypes.genTypeCategory CF.AilSyntax.sigma)
+      ~(prog5 : unit Mucore.file)
+      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      ~(data_points : Fp_codegen.dp_entry list)
+      ~(qualifiers : (int * Qualifier.t) list)
   : Fp_table.t
   =
   let safe_func =
@@ -70,7 +77,17 @@ let run
   let obj_path = Filename.concat output_dir (stem ^ ".o") in
   let exe_path = Filename.concat output_dir (stem ^ ".out") in
   let json_path = Filename.concat output_dir (stem ^ ".json") in
-  let input = { input with output_json_path = json_path } in
+  let input : Fp_codegen.input =
+    { filename;
+      cabs_tunit;
+      ail_prog;
+      prog5;
+      pred_defs;
+      data_points;
+      qualifiers;
+      output_json_path = json_path
+    }
+  in
   let src = Fp_codegen.emit input in
   let oc = open_out src_path in
   output_string oc src;

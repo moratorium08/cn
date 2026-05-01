@@ -1,6 +1,8 @@
 (** Drive the bi-abductive footprint harness end to end:
     [Fp_codegen.emit] → write to disk → [cc] → run → parse JSON. *)
 
+module CF = Cerb_frontend
+
 (** Compile and execute the harness, returning a populated [Fp_table].
 
     [output_dir] should already exist; the harness source, object and
@@ -15,5 +17,11 @@ val run
   cn_runtime_prefix:string ->
   func_name:string ->
   tag:string ->
-  Fp_codegen.input ->
+  filename:string ->
+  cabs_tunit:CF.Cabs.translation_unit ->
+  ail_prog:CF.GenTypes.genTypeCategory CF.AilSyntax.sigma ->
+  prog5:unit Mucore.file ->
+  pred_defs:Definition.Predicate.t Sym.Map.t ->
+  data_points:Fp_codegen.dp_entry list ->
+  qualifiers:(int * Qualifier.t) list ->
   Fp_table.t

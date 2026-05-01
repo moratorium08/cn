@@ -79,24 +79,19 @@ let compute_predicate_table
   match qualifiers with
   | [] -> Fp_table.empty
   | _ ->
-    let codegen_input : Fp_codegen.input =
-      { filename = harness.filename;
-        cabs_tunit = harness.cabs_tunit;
-        ail_prog = harness.ail_prog;
-        prog5 = harness.prog5;
-        pred_defs;
-        data_points;
-        qualifiers;
-        output_json_path = "" (* set inside Fp_runner.run *)
-      }
-    in
     Fp_runner.run
       ~cc:harness.cc
       ~output_dir:harness.output_dir
       ~cn_runtime_prefix:harness.cn_runtime_prefix
       ~func_name
       ~tag
-      codegen_input
+      ~filename:harness.filename
+      ~cabs_tunit:harness.cabs_tunit
+      ~ail_prog:harness.ail_prog
+      ~prog5:harness.prog5
+      ~pred_defs
+      ~data_points
+      ~qualifiers
 
 
 let lookup
