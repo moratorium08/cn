@@ -21,14 +21,19 @@ let owned_footprint ~(ct : Sctypes.t) ~(base_addr : int64) : Int64Set.t =
   add_words Int64Set.empty 0
 
 
-(** Evaluate a simple pointer term to a concrete address using variable bindings. *)
-let eval_pointer_term (term : IndexTerms.t) (var_env : (string * int64) list)
+(** Evaluate a simple pointer term to a concrete address using pre-state variables. *)
+let eval_pointer_term
+      (term : IndexTerms.t)
+      (pre_vars : Data_point.var_binding list)
   : int64 option
   =
   match term with
   | Terms.IT (Sym sym, _, _) ->
     let name = Sym.pp_string sym in
-    StdList.assoc_opt name var_env
+    StdList.find_map
+      (fun (v : Data_point.var_binding) ->
+         if String.equal v.name name then Some v.value else None)
+      pre_vars
   | _ -> None
 
 
@@ -36,12 +41,9 @@ let eval_pointer_term (term : IndexTerms.t) (var_env : (string * int64) list)
     qualifiers always return [None] from this entry point; their footprints
     come from the C harness. *)
 let compute (qualifier : Qualifier.t) (dp : Data_point.data_point) : Int64Set.t option =
-  let var_env =
-    StdList.map (fun (v : Data_point.var_binding) -> (v.name, v.value)) dp.pre_vars
-  in
   match qualifier with
   | Request.P { name = Owned (ct, _init); pointer; iargs = _ } ->
-    (match eval_pointer_term pointer var_env with
+    (match eval_pointer_term pointer dp.pre_vars with
      | Some addr -> Some (owned_footprint ~ct ~base_addr:addr)
      | None -> None)
   | Request.P { name = PName _; _ } -> None
