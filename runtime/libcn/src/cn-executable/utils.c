@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <cn-executable/bi_abduction.h>
 #include <cn-executable/rmap.h>
@@ -84,6 +85,7 @@ void cn_failure_default(enum cn_failure_mode failure_mode, enum spec_mode spec_m
     case CN_FAILURE_CHECK_OWNERSHIP:
     case CN_FAILURE_OWNERSHIP_LEAK:
     case CN_FAILURE_GHOST_ARGS:
+    case CN_FAILURE_HEAP_MISS:
       exit(exit_code);
   }
 }
@@ -100,6 +102,17 @@ void set_cn_failure_cb(cn_failure_callback callback) {
 
 void reset_cn_failure_cb(void) {
   cn_failure_aux = &cn_failure_default;
+}
+
+cn_load_hook_t cn_load_hook = NULL;
+
+void cn_owned_load(const void* p, size_t sz, void* dst, enum spec_mode spec_mode) {
+  if (cn_load_hook) {
+    if (!cn_load_hook(p, sz, dst))
+      cn_failure(CN_FAILURE_HEAP_MISS, spec_mode);
+  } else {
+    memcpy(dst, p, sz);
+  }
 }
 
 static enum cn_trace_granularity trace_granularity = CN_TRACE_NONE;

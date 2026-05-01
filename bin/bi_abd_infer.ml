@@ -68,28 +68,32 @@ let extract_function_args (sigm : _ A.sigma) : (string * (string * Sctypes.t) li
     sigm.A.function_definitions
 
 
+(** Resolve the CN runtime prefix (directory containing [include/] and
+    [libcn_exec.a]). *)
+let resolve_cn_runtime_prefix () : string =
+  match Sys.getenv_opt "CN_RUNTIME_PREFIX" with
+  | Some p when Sys.file_exists (Filename.concat p "include") -> p
+  | _ ->
+    let opam_rt =
+      match Sys.getenv_opt "OPAM_SWITCH_PREFIX" with
+      | Some p -> p ^ "/lib/cn/runtime"
+      | None -> ""
+    in
+    if String.length opam_rt > 0 && Sys.file_exists opam_rt then
+      opam_rt
+    else (
+      Printf.eprintf
+        "Could not find CN runtime. Set CN_RUNTIME_PREFIX or install CN.\n\
+         For development: CN_RUNTIME_PREFIX should contain include/ and libcn_exec.a\n";
+      exit 1)
+
+
 (** Compile and run the instrumented file as a subprocess.
     Returns the exit code. *)
 let compile_and_run ~cc ~output_dir ~instrumented_file =
-  (* Find runtime include/lib paths *)
-  let includes, lib_path =
-    match Sys.getenv_opt "CN_RUNTIME_PREFIX" with
-    | Some p when Sys.file_exists (Filename.concat p "include") ->
-      ("-I" ^ Filename.concat p "include", Filename.concat p "libcn_exec.a")
-    | _ ->
-      let opam_rt =
-        match Sys.getenv_opt "OPAM_SWITCH_PREFIX" with
-        | Some p -> p ^ "/lib/cn/runtime"
-        | None -> ""
-      in
-      if String.length opam_rt > 0 && Sys.file_exists opam_rt then
-        ("-I" ^ Filename.concat opam_rt "include", Filename.concat opam_rt "libcn_exec.a")
-      else (
-        Printf.eprintf
-          "Could not find CN runtime. Set CN_RUNTIME_PREFIX or install CN.\n\
-           For development: CN_RUNTIME_PREFIX should contain include/ and libcn_exec.a\n";
-        exit 1)
-  in
+  let cn_runtime_prefix = resolve_cn_runtime_prefix () in
+  let includes = "-I" ^ Filename.concat cn_runtime_prefix "include" in
+  let lib_path = Filename.concat cn_runtime_prefix "libcn_exec.a" in
   let obj_file =
     Filename.concat
       output_dir
@@ -233,9 +237,21 @@ let generate_bi_abd
       else (
         Printf.printf "Running inference...\n%!";
         let config = Bi_abduction.Enumerator.default_config in
+        let cn_runtime_prefix = resolve_cn_runtime_prefix () in
+        let harness : Bi_abduction.Footprint.harness_ctx =
+          { cc;
+            output_dir;
+            cn_runtime_prefix;
+            filename;
+            cabs_tunit;
+            ail_prog = sigm;
+            prog5
+          }
+        in
         let specs =
-          Bi_abduction.Infer.infer_from_files
+          Bi_abduction.Infer.infer
             ~config
+            ~harness
             ~summary_file
             ~heap_file
             ~pred_defs

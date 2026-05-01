@@ -1,13 +1,17 @@
 (** Top-level inference orchestrator.
 
     Pipeline: parse summary + heap → group by function → for each function:
-    build memory graph → enumerate qualifiers → compute footprints →
-    run cover algorithm → format as CN annotation suggestions.
+    enumerate qualifiers → run the predicate-footprint harness → compute
+    cover → format suggestions.
+
+    Owned qualifiers get analytical footprints from [Footprint.owned_footprint].
+    Predicate qualifiers get their footprints from a generated C harness
+    ([Fp_codegen]) compiled and run by [Fp_runner].
 
     Debug output via [Pp.debug]:
     - Level 2: pipeline stages
     - Level 3: data point details, representative selection
-    - Level 4: graph stats, enumeration results
+    - Level 4: enumeration / harness results
     - Level 5: per-qualifier footprints, cover steps *)
 
 module StdList = Stdlib.List
@@ -23,44 +27,20 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
-(** Build struct layouts from struct definitions.
-    Maps struct tag → list of (field_id, byte_offset, byte_size). *)
-let build_struct_layouts (struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-  : (Id.t * int * int) list Sym.Map.t
-  =
-  Sym.Map.map
-    (fun fields ->
-       let _, rev_layout =
-         StdList.fold_left
-           (fun (running_offset, acc) (field_id, field_ct) ->
-              let size = Memory.size_of_ctype field_ct in
-              let align = Memory.align_of_ctype field_ct in
-              let aligned_offset =
-                if align > 0 then (
-                  let rem = running_offset mod align in
-                  if rem = 0 then
-                    running_offset
-                  else
-                    running_offset + (align - rem))
-                else
-                  running_offset
-              in
-              (aligned_offset + size, (field_id, aligned_offset, size) :: acc))
-           (0, [])
-           fields
-       in
-       StdList.rev rev_layout)
-    struct_defs
+let is_predicate_qualifier (q : Qualifier.t) : bool =
+  match q with
+  | Request.P { name = PName _; _ } -> true
+  | _ -> false
 
 
 (** Run the inference pipeline for one function. *)
 let infer_function
       ~(config : Enumerator.config)
+      ~(harness : Footprint.harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
-      ~(pre_heap_lookup : int64 -> int64 option)
-      ~(post_heap_lookup : int64 -> int64 option)
+      ~(pre_heap_words : (int64 * int64) list)
+      ~(post_heap_words : (int64 * int64) list)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -69,17 +49,7 @@ let infer_function
   Pp.debug 2 (lazy (headline ("bi-abd: inferring specs for " ^ func_name)));
   Pp.debug 3 (lazy (item "data points" (Pp.int (StdList.length dps))));
   let loc = Locations.other __FUNCTION__ in
-  let struct_layouts = build_struct_layouts struct_defs in
-  Pp.debug
-    4
-    (lazy
-      (item
-         "struct layouts"
-         (Pp.int (Sym.Map.cardinal struct_layouts) ^^^ !^"struct types")));
-  (* Baseline mode: infer from one representative execution only.
-     This keeps the concrete story simple and avoids mixing incompatible heap
-     addresses from distinct runs. Generalising across executions is left to
-     the TODO path. *)
+  (* Baseline: pick the dp with the richest missing set as the representative. *)
   let representative_dp =
     StdList.fold_left
       (fun best (dp : Data_point.data_point) ->
@@ -130,58 +100,60 @@ let infer_function
            func_name
            (Pp.plain (Sctypes.pp ct)))
   in
-  (* Extract function arguments with actual pointee types when available. *)
   let args = StdList.map arg_of_var representative_dp.pre_vars in
-  (* Build variable name → address mapping for predicate connectivity check *)
-  let var_addrs =
-    StdList.map
-      (fun (v : Data_point.var_binding) -> (v.name, v.value))
-      representative_dp.Data_point.pre_vars
+  let candidates_raw = Enumerator.enumerate ~config ~args ~pred_defs ~loc in
+  Pp.debug
+    4
+    (lazy
+      (item
+         "candidates (raw)"
+         (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
+  StdList.iter
+    (fun q -> Pp.debug 5 (lazy (item "  candidate" (Qualifier.pp q))))
+    candidates_raw;
+  let candidates_indexed = StdList.mapi (fun i q -> (i, q)) candidates_raw in
+  let pred_qualifiers =
+    StdList.filter (fun (_, q) -> is_predicate_qualifier q) candidates_indexed
   in
-  (* Run the pipeline for a single phase. pre and post differ only in which
-     heap snapshot, missing-entry field, and phase label they use:
-     - Pre:  H_entry snapshot, body_missing    (body auto-grants = pre needs)
-     - Post: H_exit  snapshot, post_remaining  (leak check remainder = post) *)
+  Pp.debug
+    4
+    (lazy
+      (item
+         "predicate qualifiers"
+         (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
+  (* Today the harness sweeps over a singleton [dp_entry] (the
+     representative dp).  Adding more dps here is a pure data change
+     — the codegen and lookup are already keyed on dp_idx. *)
+  let representative_dp_idx = 0 in
+  let run_harness ~tag ~heap_words : Fp_table.t =
+    Footprint.compute_predicate_table
+      ~harness
+      ~tag
+      ~func_name
+      ~pred_defs
+      ~data_points:[ { dp_idx = representative_dp_idx; dp = representative_dp; heap_words } ]
+      ~qualifiers:pred_qualifiers
+  in
+  let pre_fp_table = run_harness ~tag:"pre" ~heap_words:pre_heap_words in
+  let post_fp_table = run_harness ~tag:"post" ~heap_words:post_heap_words in
+  let footprint_of ~(fp_table : Fp_table.t) (q_idx, q) : Int64Set.t option =
+    Footprint.lookup
+      ~representative_dp
+      ~representative_dp_idx
+      ~fp_table
+      (q_idx, q)
+  in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
-    let phase_label, heap_lookup, select_missing =
+    let phase_label, select_missing, fp_table =
       match phase with
       | `Pre ->
-        ("pre", pre_heap_lookup, fun (dp : Data_point.data_point) -> dp.body_missing)
+        ("pre", (fun (dp : Data_point.data_point) -> dp.body_missing), pre_fp_table)
       | `Post ->
-        ("post", post_heap_lookup, fun (dp : Data_point.data_point) -> dp.post_remaining)
+        ( "post",
+          (fun (dp : Data_point.data_point) -> dp.post_remaining),
+          post_fp_table )
     in
-    let missing_set = Data_point.missing_addr_set (select_missing representative_dp) in
-    let graph =
-      Memory_graph.build
-        ~pre_vars:representative_dp.pre_vars
-        ~missing_set
-        ~heap_lookup
-        ~struct_layouts
-    in
-    Pp.debug
-      4
-      (lazy
-        (item
-           (phase_label ^ " memory graph")
-           !^(Printf.sprintf
-                "%d nodes, %d anchors, %d missing"
-                (Memory_graph.Int64Map.cardinal (Memory_graph.info graph))
-                (Int64Set.cardinal (Memory_graph.anchors graph))
-                (Int64Set.cardinal (Memory_graph.missing graph)))));
-    let must_cover = missing_set in
-    let candidates_raw =
-      Enumerator.enumerate ~config ~args ~pred_defs ~graph ~var_addrs ~loc
-    in
-    Pp.debug
-      4
-      (lazy
-        (item
-           (phase_label ^ " candidates (raw)")
-           (Pp.int (StdList.length candidates_raw) ^^^ !^"qualifiers")));
-    StdList.iter
-      (fun q ->
-         Pp.debug 5 (lazy (item ("  " ^ phase_label ^ " candidate") (Qualifier.pp q))))
-      candidates_raw;
+    let must_cover = Data_point.missing_addr_set (select_missing representative_dp) in
     Pp.debug
       3
       (lazy
@@ -190,10 +162,8 @@ let infer_function
            (Pp.int (Int64Set.cardinal must_cover) ^^^ !^"bytes")));
     let candidates =
       StdList.filter_map
-        (fun q ->
-           match
-             Footprint.compute_with_graph q representative_dp graph ~struct_layouts
-           with
+        (fun (q_idx, q) ->
+           match footprint_of ~fp_table (q_idx, q) with
            | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
              let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
              Pp.debug
@@ -209,7 +179,7 @@ let infer_function
                      ^^^ !^"covering must")));
              Some { Cover.qualifier = q; footprint = fp }
            | _ -> None)
-        candidates_raw
+        candidates_indexed
     in
     Pp.debug
       4
@@ -240,12 +210,12 @@ let infer_function
   { function_name = func_name; qualifiers }
 
 
-(** Main entry point: run inference on execution data. *)
+(** Main entry: parse the summary + heap files and infer per function. *)
 let infer
       ~(config : Enumerator.config)
-      ~(execution_data : Data_point.execution_data)
-      ~(pre_heap_lookup : int64 -> int64 option)
-      ~(post_heap_lookup : int64 -> int64 option)
+      ~(harness : Footprint.harness_ctx)
+      ~(summary_file : string)
+      ~(heap_file : string)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(function_args : (string * (string * Sctypes.t) list) list)
@@ -253,6 +223,28 @@ let infer
   =
   let open Pp in
   Pp.debug 2 (lazy (headline "bi-abd: starting inference"));
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
+  let execution_data = Data_point.parse_summary_json summary_file in
+  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
+  let pre_dumps, post_dumps = Data_point.parse_heap_jsonl heap_file in
+  Pp.debug
+    3
+    (lazy
+      (Pp.item
+         "heap dumps"
+         (Pp.string
+            (Printf.sprintf
+               "pre:%d post:%d"
+               (StdList.length pre_dumps)
+               (StdList.length post_dumps)))));
+  (* Run the harness once per phase against its matching heap snapshot:
+     [pre_heap_words] for the body_missing (precondition) phase,
+     [post_heap_words] for the post_remaining (postcondition) phase.
+     For functions that mutate the heap (e.g. constructors, setters)
+     these snapshots differ, so reusing one for both phases would either
+     reject or mis-shape the postcondition predicates. *)
+  let pre_heap_words = Data_point.flatten_heap_dumps pre_dumps in
+  let post_heap_words = Data_point.flatten_heap_dumps post_dumps in
   Pp.debug
     2
     (lazy
@@ -287,11 +279,11 @@ let infer
          Some
            (infer_function
               ~config
+              ~harness
               ~pred_defs
-              ~struct_defs
               ~signature_args
-              ~pre_heap_lookup
-              ~post_heap_lookup
+              ~pre_heap_words
+              ~post_heap_words
               ~func_name
               ~dps))
     grouped
@@ -327,39 +319,3 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
          header ^^ pre_doc ^^ post_doc)
     specs
   |> separate (hardline ^^ hardline)
-
-
-(** Run inference from file paths (convenience entry point). *)
-let infer_from_files
-      ~(config : Enumerator.config)
-      ~(summary_file : string)
-      ~(heap_file : string)
-      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
-      ~(function_args : (string * (string * Sctypes.t) list) list)
-  : inferred_spec list
-  =
-  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
-  let execution_data = Data_point.parse_summary_json summary_file in
-  Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
-  let pre_dumps, post_dumps = Data_point.parse_heap_jsonl heap_file in
-  Pp.debug
-    3
-    (lazy
-      (Pp.item
-         "heap dumps"
-         (Pp.string
-            (Printf.sprintf
-               "pre:%d post:%d"
-               (StdList.length pre_dumps)
-               (StdList.length post_dumps)))));
-  let pre_heap_lookup = Data_point.heap_lookup pre_dumps in
-  let post_heap_lookup = Data_point.heap_lookup post_dumps in
-  infer
-    ~config
-    ~execution_data
-    ~pre_heap_lookup
-    ~post_heap_lookup
-    ~pred_defs
-    ~struct_defs
-    ~function_args

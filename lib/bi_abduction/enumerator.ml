@@ -145,14 +145,10 @@ let enumerate
       ~(config : config)
       ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(graph : Memory_graph.t)
-      ~(var_addrs : (string * int64) list)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
   ignore config;
-  ignore graph;
-  ignore var_addrs;
   let owned_qs = owned_qualifiers ~args ~loc in
   Pp.debug 4 (lazy (Pp.item "enum: owned qualifiers" (Pp.int (StdList.length owned_qs))));
   let pred_qs = predicate_qualifiers ~args ~pred_defs ~loc in

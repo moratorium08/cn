@@ -45,3 +45,8 @@ val missing_addr_set : missing_entry list -> Int64Set.t
 
 (** Build a lookup from heap dumps: given an address, return the 8-byte value if known. *)
 val heap_lookup : heap_dump list -> int64 -> int64 option
+
+(** Flatten heap dumps into a deduplicated [(addr, value)] list (most recent
+    value wins).  Useful when feeding heap state to the bi-abductive
+    footprint harness. *)
+val flatten_heap_dumps : heap_dump list -> (int64 * int64) list

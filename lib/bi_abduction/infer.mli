@@ -12,21 +12,12 @@ type inferred_spec =
 
 val infer
   :  config:Enumerator.config ->
-  execution_data:Data_point.execution_data ->
-  pre_heap_lookup:(int64 -> int64 option) ->
-  post_heap_lookup:(int64 -> int64 option) ->
-  pred_defs:Definition.Predicate.t Sym.Map.t ->
-  struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
-  function_args:(string * (string * Sctypes.t) list) list ->
-  inferred_spec list
-
-val pp_suggestions : inferred_spec list -> Pp.document
-
-val infer_from_files
-  :  config:Enumerator.config ->
+  harness:Footprint.harness_ctx ->
   summary_file:string ->
   heap_file:string ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->
   struct_defs:(Id.t * Sctypes.t) list Sym.Map.t ->
   function_args:(string * (string * Sctypes.t) list) list ->
   inferred_spec list
+
+val pp_suggestions : inferred_spec list -> Pp.document
