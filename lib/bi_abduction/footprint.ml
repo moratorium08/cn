@@ -19,12 +19,6 @@ type harness_ctx =
     prog5 : unit Mucore.file
   }
 
-type harness_data_point =
-  { dp_idx : int;
-    dp : Data_point.data_point;
-    heap_words : (int64 * int64) list
-  }
-
 (** Compute the footprint of an Owned<ct>(ptr) qualifier at a concrete address. *)
 let owned_footprint ~(ct : Sctypes.t) ~(base_addr : int64) : Int64Set.t =
   let size = Memory.size_of_ctype ct in
@@ -78,19 +72,13 @@ let compute_predicate_table
       ~(tag : string)
       ~(func_name : string)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      ~(data_points : harness_data_point list)
+      ~(data_points : Fp_codegen.dp_entry list)
       ~(qualifiers : (int * Qualifier.t) list)
   : Fp_table.t
   =
   match qualifiers with
   | [] -> Fp_table.empty
   | _ ->
-    let data_points =
-      StdList.map
-        (fun (dp : harness_data_point) : Fp_codegen.dp_entry ->
-           { dp_idx = dp.dp_idx; dp = dp.dp; heap_words = dp.heap_words })
-        data_points
-    in
     let codegen_input : Fp_codegen.input =
       { filename = harness.filename;
         cabs_tunit = harness.cabs_tunit;

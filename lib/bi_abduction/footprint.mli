@@ -16,13 +16,6 @@ type harness_ctx =
     prog5 : unit Mucore.file
   }
 
-(** A data point and heap snapshot as consumed by the predicate harness. *)
-type harness_data_point =
-  { dp_idx : int;
-    dp : Data_point.data_point;
-    heap_words : (int64 * int64) list
-  }
-
 val owned_footprint : ct:Sctypes.t -> base_addr:int64 -> Int64Set.t
 
 val compute : Qualifier.t -> Data_point.data_point -> Int64Set.t option
@@ -37,7 +30,7 @@ val compute_predicate_table
   tag:string ->
   func_name:string ->
   pred_defs:Definition.Predicate.t Sym.Map.t ->
-  data_points:harness_data_point list ->
+  data_points:Fp_codegen.dp_entry list ->
   qualifiers:(int * Qualifier.t) list ->
   Fp_table.t
 
