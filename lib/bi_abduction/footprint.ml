@@ -96,7 +96,7 @@ let compute_predicate_table
 
 (** Footprint of qualifier [q] (with candidate index [q_idx]) on data point
     [dp]: analytically for singleton Owned chains, from the harness table
-    (keyed by (q_idx, dp.dp_idx)) for predicates. *)
+    (keyed by (q_idx, dp.dp_idx)) for predicates and multi-step chains. *)
 let lookup
       ~(dp : Data_point.data_point)
       ~(fp_table : Fp_table.t)
@@ -105,6 +105,5 @@ let lookup
   =
   match Qualifier.singleton_req q with
   | Some (Request.P { name = Owned _; _ }) -> compute q dp
-  | Some (Request.P { name = PName _; _ }) ->
+  | _ ->
     (match Fp_table.find fp_table (q_idx, dp.dp_idx) with Some fp -> fp | None -> None)
-  | _ -> None

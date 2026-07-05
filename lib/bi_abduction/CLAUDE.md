@@ -20,7 +20,7 @@ Entry points:
 |---|---|
 | `data_point.ml` | Parse `cn_abd_summary.json` and `cn_abd_heap.jsonl`, both keyed per activation (`dp`). Types: `var_binding`, `missing_entry`, `data_point` (with `dp_idx`, `post_vars`, `owned_pre`), `heap_dumps_by_dp`. |
 | `qualifier.ml` | A qualifier is a *chain* of named `take` bindings (`step list`); singleton chains are today's flat qualifiers, multi-step chains are IDEA.md 4.4. Uses CN's existing `Request.t`, `IndexTerms.t`, `Sctypes.t` — no parallel type hierarchy. |
-| `enumerator.ml` | Generate candidate qualifiers naively from the current function scope: `Owned<T>(arg)` for pointer args, plus every well-typed predicate application rooted at a pointer arg with iargs drawn from in-scope args and small constants. No heap-shape filtering — wrong candidates are rejected by the harness. |
+| `enumerator.ml` | Generate candidate qualifiers naively from the current function scope: `Owned<T>(arg)` for pointer args, every well-typed predicate application rooted at a pointer arg (iargs from in-scope args + small constants), and depth-2 chains through pointer-typed fields of struct-pointer args (`take W = RW<struct S>(arg); take _ = Q(W.field)`; one stable prefix per arg, so chains share it). No heap-shape filtering — wrong candidates are rejected by the harness. |
 | `fp_codegen.ml` | Emit a self-contained C harness (`bi_abd_fp_<func>.c`) that runs each predicate qualifier in PRE mode against a recorded heap. Reuses Fulminate.Internal helpers for predicate / struct / record / conversion / ownership C codegen. |
 | `fp_runner.ml` | Drive the harness end to end: write the .c, invoke `cc` to compile + link against `libcn_exec.a`, run, parse the JSON output. |
 | `fp_table.ml` | Typed lookup `(qualifier_idx) → Int64Set.t option`, populated from the harness's JSON. |
@@ -103,7 +103,7 @@ The inference modules use `Pp.debug` at these levels:
 
 See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 
-- **Chains are type-only** — `Qualifier.t` is chain-shaped but the enumerator only emits singletons; the harness renders only singletons
+- **Chains are depth-2 only** — `take W = RW<struct S>(arg); take _ = Q(W.field)`; deeper nesting fails honestly (`step3_chain_depth_limit.c`)
 - **No iterated resources (`each`), free/malloc, loop invariants**
 - **`return` is recorded but not yet used as a candidate anchor**
 

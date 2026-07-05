@@ -141,13 +141,103 @@ let predicate_qualifiers
     []
 
 
+(** Generate depth-2 qualifier chains (IDEA.md 4.4):
+
+      take W = RW<struct S>(arg); take _ = Q(W.field);
+
+    for each struct-pointer argument, each pointer-typed field of the
+    pointee, and each leaf request Q (a user predicate with naively chosen
+    iargs, or RW of the field's pointee type).  The prefix step is built
+    *once per argument* with a stable bound name, so chains rooted at the
+    same argument share it — Cover and the printer merge shared prefixes
+    (the duplicated-prefix problem of IDEA.md 4.4). *)
+let chain_qualifiers
+      ~(args : arg list)
+      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
+      ~(loc : Locations.t)
+  : Qualifier.t list
+  =
+  let rec choose_iargs = function
+    | [] -> [ [] ]
+    | (_iarg_sym, iarg_bt) :: rest ->
+      let choices = choices_for_bt ~args ~loc ~bt:iarg_bt in
+      StdList.concat_map
+        (fun choice -> StdList.map (fun suffix -> choice :: suffix) (choose_iargs rest))
+        choices
+  in
+  StdList.concat_map
+    (fun (arg : arg) ->
+       match arg.owned_ct with
+       | Some (Sctypes.Struct tag as struct_ct) ->
+         (match Sym.Map.find_opt tag struct_defs with
+          | None -> []
+          | Some fields ->
+            let w_sym = Sym.fresh (Sym.pp_string arg.sym ^ "_W") in
+            let prefix : Qualifier.step =
+              { name = w_sym;
+                req =
+                  Request.P
+                    { name = Owned (struct_ct, Init);
+                      pointer = arg_term ~loc arg;
+                      iargs = []
+                    }
+              }
+            in
+            let w_term = IT.sym_ (w_sym, BT.Struct tag, loc) in
+            StdList.concat_map
+              (fun (fid, field_ct) ->
+                 match field_ct with
+                 | Sctypes.Pointer ((Sctypes.Void | Sctypes.Function _) as _unsupported)
+                   ->
+                   []
+                 | Sctypes.Pointer pointee_ct ->
+                   let fld_term = IT.member_ ~member_bt:(BT.Loc ()) (w_term, fid) loc in
+                   let leaf_owned : Qualifier.step =
+                     { name = Sym.fresh_anon ();
+                       req =
+                         Request.P
+                           { name = Owned (pointee_ct, Init);
+                             pointer = fld_term;
+                             iargs = []
+                           }
+                     }
+                   in
+                   let leaf_preds =
+                     Sym.Map.fold
+                       (fun pred_name (pred_def : Definition.Predicate.t) acc ->
+                          let qs =
+                            choose_iargs pred_def.iargs
+                            |> StdList.map (fun iargs : Qualifier.step ->
+                              { name = Sym.fresh_anon ();
+                                req =
+                                  Request.P
+                                    { name = PName pred_name; pointer = fld_term; iargs }
+                              })
+                          in
+                          qs @ acc)
+                       pred_defs
+                       []
+                   in
+                   (* predicates first: on footprint ties (e.g. a one-node
+                      list) the greedy cover then prefers the
+                      shape-generalising predicate over a fixed RW *)
+                   StdList.map (fun leaf -> [ prefix; leaf ]) (leaf_preds @ [ leaf_owned ])
+                 | _ -> [])
+              fields)
+       | _ -> [])
+    args
+
+
 (* HK(TODO): make this lazy *)
 
-(** Main enumeration entry point. *)
+(** Main enumeration entry point.  Chains come last so that, on footprint
+    ties, the greedy cover prefers flat qualifiers. *)
 let enumerate
       ~(config : config)
       ~(args : arg list)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(loc : Locations.t)
   : Qualifier.t list
   =
@@ -158,4 +248,6 @@ let enumerate
   Pp.debug
     4
     (lazy (Pp.item "enum: predicate qualifiers" (Pp.int (StdList.length pred_qs))));
-  dedup (owned_qs @ pred_qs)
+  let chain_qs = chain_qualifiers ~args ~pred_defs ~struct_defs ~loc in
+  Pp.debug 4 (lazy (Pp.item "enum: chain qualifiers" (Pp.int (StdList.length chain_qs))));
+  dedup (owned_qs @ pred_qs @ chain_qs)

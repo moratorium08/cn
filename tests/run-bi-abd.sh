@@ -68,6 +68,11 @@ expectations_for() {
         '/* Function: first_val */' \
         'take _ = IntList(p);'
       ;;
+    step3_chain_depth_limit.c)
+      printf '%s\n' \
+        '/* Function: deep_length */' \
+        '/* inference failed */'
+      ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
         '/* Function: sum_pair */' \
@@ -76,7 +81,9 @@ expectations_for() {
     baseline_wrapper_lists.c)
       printf '%s\n' \
         '/* Function: total_length */' \
-        '/* inference failed */'
+        'take b_W = RW<struct list_pair>(b);' \
+        'take _ = IntList(b_W.xs);' \
+        'take _ = IntList(b_W.ys);'
       ;;
     extra_iarg_name_capture.c)
       printf '%s\n' \
@@ -96,7 +103,8 @@ expectations_for() {
     extra_predicate_body_ignored.c)
       printf '%s\n' \
         '/* Function: list_length */' \
-        '/* inference failed */'
+        'take p_W = RW<struct node>(p);' \
+        'take _ = RW<struct node>(p_W.next);'
       ;;
     extra_scalar_pointer_missing.c)
       printf '%s\n' \
@@ -119,6 +127,11 @@ expectations_for() {
 # plain substring, so patterns may span lines).  Empty for most tests.
 forbidden_for() {
   case "$1" in
+    extra_predicate_body_ignored.c)
+      # the observed list has positive values, so the take semantics
+      # rejects NegList (assert H.val < 0 fails)
+      printf 'NegList(p);'
+      ;;
     step0_interval_owner.c)
       # caller already owns *p via its own precondition; the interval rule
       # must not abduce it into caller's anti-frame (no suggestions at all).
@@ -213,6 +226,7 @@ main() {
       step0_interval_owner.c
       step0_partial_spec_b.c
       step2_null_guard.c
+      step3_chain_depth_limit.c
     )
   fi
 

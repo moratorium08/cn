@@ -19,6 +19,10 @@ val singleton_req : t -> Request.t option
 (** Render as CN [take] line(s), suitable for spec suggestions. *)
 val pp_takes : t -> Pp.document
 
+(** Render a list of selected qualifiers as take lines, printing steps
+    shared between chains only once (IDEA.md 4.4 prefix merging). *)
+val pp_takes_merged : t list -> Pp.document list
+
 (** Compact rendering (no [take]), for debug output. *)
 val pp : t -> Pp.document
 

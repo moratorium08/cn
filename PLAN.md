@@ -196,6 +196,20 @@ Programs for which `cn bi-abd file.c` produces a correct suggestion today
 > over-approximation tie-break (`Σ_j |F_j \ A_j|`).  `Owned` footprints
 > are ⊥ at NULL, so base-case activations reject unguarded `RW`
 > candidates in favour of guarded predicates (`step2_null_guard.c`).
+>
+> **Step 3 (done, depth 2):** qualifier chains.  The enumerator emits
+> `take W = RW<struct S>(arg); take _ = Q(W.field)` for pointer-typed
+> fields of struct-pointer arguments, with one stable prefix per
+> argument; the harness renders chains as sequential calls (generating
+> `owned_<S>` functions that predicate bodies alone did not induce);
+> Cover decomposes candidates into canonical *steps* so chains share
+> prefixes (§4.4 — a shared step's footprint is counted once), and the
+> printer merges them.  `baseline_wrapper_lists.c` now yields
+> `take b_W = RW<struct list_pair>(b); take _ = IntList(b_W.xs);
+> take _ = IntList(b_W.ys);`; depth ≥ 3 fails honestly
+> (`step3_chain_depth_limit.c`).  Deferred within Step 3: `return` as a
+> post anchor (needs per-phase candidate sets; the value is recorded),
+> chains rooted at user-spec bindings, deeper chains.
 
 Five steps, each independently landable, each leaving `tests/run-bi-abd.sh`
 green (with deliberate expectation updates) and the standard suites

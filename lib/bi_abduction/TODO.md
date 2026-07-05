@@ -64,13 +64,20 @@ Loop invariants are structurally different from pre/post specs — they must hol
 **Approach**: Record missing addresses at each loop iteration boundary (would need a `cn_abd_loop_iter()` hook). Generalise across iterations to find the invariant pattern. This is hard: the invariant must relate to the loop counter symbolically, not just concrete addresses.
 
 
-## Qualifier chains
+## Qualifier chains — depth 2 done (PLAN.md Step 3)
 
-Currently each qualifier is independent — flat, not chained.
+`take W = RW<struct S>(arg); take _ = Q(W.field)` chains are enumerated
+(one stable prefix per argument), rendered in the footprint harness
+(prefix as an `owned_<S>` call, leaf on `W->field`), and covered with
+prefix sharing (Cover works on canonical *steps*; a shared prefix is
+counted once — IDEA.md 4.4).  See `baseline_wrapper_lists.c`.
 
-Example of what's missing: `take X = Owned<struct node>(p); take Y = IntList(X.next);`. The second qualifier depends on the value bound by the first. The enumerator only generates top-level qualifiers from function arguments, not from intermediate bindings.
-
-**Approach**: After initial coverage, check if uncovered addresses are reachable via struct fields of already-selected qualifiers. Generate follow-up qualifiers rooted at those fields. This is essentially the "unfolding" step from IDEA.md section 4.5.
+Remaining:
+- deeper chains (depth ≥ 3, `step3_chain_depth_limit.c`) — generalise the
+  round-based enumeration and the harness chain rendering;
+- chains rooted at user-spec bindings (`First.next`) and at `return`;
+- `Qualifier.equal` is name-naive; alpha-normalisation needed once chains
+  with differing bound names can collide.
 
 
 ## Argument type inference

@@ -33,10 +33,59 @@ type inferred_spec =
     qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
   }
 
-let is_predicate_qualifier (q : Qualifier.t) : bool =
+(** Whether a qualifier's footprint must come from the generated C harness
+    (predicates and multi-step chains) rather than analytically. *)
+let needs_harness (q : Qualifier.t) : bool =
   match Qualifier.singleton_req q with
-  | Some (Request.P { name = PName _; _ }) -> true
-  | _ -> false
+  | Some (Request.P { name = Owned _; _ }) -> false
+  | _ -> true
+
+
+(** Canonical identity of a chain step, for prefix sharing in Cover: the
+    printed request (bound names are stable per enumeration, so equal
+    strings ⇔ the same step). *)
+let step_key (s : Qualifier.step) : string = Pp.plain (Request.pp s.req)
+
+(** Decompose a qualifier into Cover step units.  [total] is the footprint
+    of the whole chain per dp (from the harness).  For a two-step chain the
+    prefix footprint is computed analytically (it is a root-anchored Owned)
+    and the leaf gets the rest; sharing then works at step granularity. *)
+let steps_of
+      ~(dps : Data_point.data_point list)
+      ~(total : Int64Set.t IntMap.t)
+      (q : Qualifier.t)
+  : Cover.step_unit list option
+  =
+  match q with
+  | [ step ] -> Some [ { Cover.key = step_key step; footprints = total } ]
+  | [ prefix; leaf ] ->
+    let prefix_fps =
+      StdList.map
+        (fun (dp : Data_point.data_point) -> (dp.dp_idx, Footprint.compute [ prefix ] dp))
+        dps
+    in
+    if StdList.exists (fun (_, fp) -> Option.is_none fp) prefix_fps then
+      None
+    else (
+      let prefix_map =
+        StdList.fold_left
+          (fun acc (dp_idx, fp) -> IntMap.add dp_idx (Option.get fp) acc)
+          IntMap.empty
+          prefix_fps
+      in
+      let leaf_map =
+        IntMap.mapi
+          (fun dp_idx fp_total ->
+             match IntMap.find_opt dp_idx prefix_map with
+             | None -> fp_total
+             | Some pfx -> Int64Set.diff fp_total pfx)
+          total
+      in
+      Some
+        [ { Cover.key = step_key prefix; footprints = prefix_map };
+          { Cover.key = step_key leaf; footprints = leaf_map }
+        ])
+  | _ -> None
 
 
 (** Run the inference pipeline for one function. *)
@@ -44,6 +93,7 @@ let infer_function
       ~(config : Enumerator.config)
       ~(harness : Footprint.harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      ~(struct_defs : (Id.t * Sctypes.t) list Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
       ~(pre_heaps : Data_point.heap_dumps_by_dp)
       ~(post_heaps : Data_point.heap_dumps_by_dp)
@@ -91,7 +141,7 @@ let infer_function
   (* All activations of a function share its signature; take scope from the
      first data point. *)
   let args = StdList.map arg_of_var (StdList.hd dps).pre_vars in
-  let candidates_raw = Enumerator.enumerate ~config ~args ~pred_defs ~loc in
+  let candidates_raw = Enumerator.enumerate ~config ~args ~pred_defs ~struct_defs ~loc in
   Pp.debug
     4
     (lazy
@@ -103,13 +153,13 @@ let infer_function
     candidates_raw;
   let candidates_indexed = StdList.mapi (fun i q -> (i, q)) candidates_raw in
   let pred_qualifiers =
-    StdList.filter (fun (_, q) -> is_predicate_qualifier q) candidates_indexed
+    StdList.filter (fun (_, q) -> needs_harness q) candidates_indexed
   in
   Pp.debug
     4
     (lazy
       (item
-         "predicate qualifiers"
+         "harnessed qualifiers"
          (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
   (* The harness sweeps over every activation, each against its own heap
      snapshot; results are keyed by (q_idx, dp_idx). *)
@@ -245,7 +295,9 @@ let infer_function
                                      dp_idx
                                      (Int64Set.cardinal fp)))
                              (IntMap.bindings footprints))));
-               Some { Cover.qualifier = q; footprints })))
+               match steps_of ~dps ~total:footprints q with
+               | None -> None
+               | Some steps -> Some { Cover.qualifier = q; steps })))
         candidates_indexed
     in
     Pp.debug
@@ -348,6 +400,7 @@ let infer
               ~config
               ~harness
               ~pred_defs
+              ~struct_defs
               ~signature_args
               ~pre_heaps
               ~post_heaps
@@ -367,7 +420,7 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
       ^^ hardline
       ^^ separate
            hardline
-           (StdList.map (fun q -> string "  " ^^ nest 2 (Qualifier.pp_takes q)) qs)
+           (StdList.map (fun line -> string "  " ^^ line) (Qualifier.pp_takes_merged qs))
   in
   StdList.map
     (fun spec ->

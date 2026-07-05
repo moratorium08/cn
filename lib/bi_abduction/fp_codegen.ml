@@ -13,6 +13,7 @@ module IT = IndexTerms
 module Records = Fulminate.Records
 module Internal = Fulminate.Internal
 module Cn_to_ail = Fulminate.Cn_to_ail
+module FUtils = Fulminate.Utils
 
 type dp_entry =
   { dp_idx : int;
@@ -123,18 +124,22 @@ let dp_has_all_syms (dp : Data_point.data_point) (names : string list) : bool =
 
 (* ---------- Per-qualifier C function emission ---------- *)
 
-(** Returns [Some (pred_c_name, args)] when the qualifier is a predicate
-    application that the codegen knows how to render; otherwise [None]
-    (caller drops the qualifier). *)
-let render_qualifier_call
+(** Same naming scheme as [Cn_to_ail.generate_owned_fn_name]. *)
+let owned_fn_name (sct : Sctypes.t) : string =
+  let ct_str = FUtils.str_of_ctype (Sctypes.to_ctype sct) in
+  "owned_" ^ String.concat "_" (String.split_on_char ' ' ct_str)
+
+
+(** Render a predicate/Owned application whose pointer C expression is
+    already available as [ptr_expr] (a [cn_pointer*]). *)
+let render_leaf_call
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
-      (q : Qualifier.t)
-  : (string * string list) option
+      ~(ptr_expr : string)
+      (req : Request.t)
+  : string option
   =
-  (* Multi-step chains will be rendered as sequential take calls sharing one
-     ghost frame (Step 3 of PLAN.md); until then only singletons appear. *)
-  match Qualifier.singleton_req q with
-  | Some (Request.P { name = PName pred_sym; pointer; iargs }) ->
+  match req with
+  | Request.P { name = PName pred_sym; iargs; _ } ->
     (match Sym.Map.find_opt pred_sym pred_defs with
      | None -> None
      | Some (pred_def : Definition.Predicate.t) ->
@@ -142,16 +147,85 @@ let render_qualifier_call
        if StdList.length iarg_bts <> StdList.length iargs then
          None
        else (
-         let pointer_arg =
-           wrap_convert ~bt:(BT.Loc ()) (render_raw_value ~bt:(BT.Loc ()) pointer)
-         in
          let iarg_args =
            StdList.map2
              (fun bt it -> wrap_convert ~bt (render_raw_value ~bt it))
              iarg_bts
              iargs
          in
-         Some (Sym.pp_string pred_sym, pointer_arg :: iarg_args)))
+         let args = (ptr_expr :: iarg_args) @ [ "PRE"; "(void*)0" ] in
+         Some
+           (Printf.sprintf
+              "      (void)%s(\n          %s);\n"
+              (Sym.pp_string pred_sym)
+              (String.concat ",\n          " args))))
+  | Request.P { name = Owned (sct, _); _ } ->
+    Some
+      (Printf.sprintf "      (void)%s(%s, PRE, (void*)0);\n" (owned_fn_name sct) ptr_expr)
+  | Request.Q _ -> None
+
+
+(** Returns [Some (c_stmts, extra_owned_cts)] when the codegen knows how to
+    render the qualifier: singleton predicate applications, or two-step
+    chains [take W = RW<struct S>(root); take _ = Q(W.field)].  The extra
+    ctypes need [owned_<ct>] functions that predicate bodies alone may not
+    have induced. *)
+let render_qualifier_stmts
+      ~(pred_defs : Definition.Predicate.t Sym.Map.t)
+      (q : Qualifier.t)
+  : (string * Sctypes.t list) option
+  =
+  match q with
+  | [ { req = Request.P { name = PName _; pointer; _ } as req; _ } ] ->
+    let ptr_expr =
+      wrap_convert ~bt:(BT.Loc ()) (render_raw_value ~bt:(BT.Loc ()) pointer)
+    in
+    Option.map (fun stmt -> (stmt, [])) (render_leaf_call ~pred_defs ~ptr_expr req)
+  | [ { name = w_sym;
+        req =
+          Request.P { name = Owned ((Sctypes.Struct tag as struct_ct), _); pointer; _ }
+      };
+      { req = leaf_req; _ }
+    ] ->
+    (* take W = RW<struct S>(root); take _ = Q(W.field) *)
+    let w_name =
+      Stdlib.String.map
+        (fun c -> if Char.equal c '.' then '_' else c)
+        (Sym.pp_string w_sym)
+    in
+    let leaf_ptr =
+      match leaf_req with
+      | Request.P
+          { pointer = Terms.IT (StructMember (Terms.IT (Sym s, _, _), fid), _, _); _ }
+        when Sym.equal s w_sym ->
+        Some (Printf.sprintf "%s->%s" w_name (Id.get_string fid))
+      | _ -> None
+    in
+    (match leaf_ptr with
+     | None -> None
+     | Some ptr_expr ->
+       (match render_leaf_call ~pred_defs ~ptr_expr leaf_req with
+        | None -> None
+        | Some leaf_stmt ->
+          let root_expr =
+            wrap_convert ~bt:(BT.Loc ()) (render_raw_value ~bt:(BT.Loc ()) pointer)
+          in
+          let prefix_stmt =
+            Printf.sprintf
+              "      struct %s_cn *%s = %s(%s, PRE, (void*)0);\n"
+              (Sym.pp_string tag)
+              w_name
+              (owned_fn_name struct_ct)
+              root_expr
+          in
+          let extra_cts =
+            struct_ct
+            ::
+            (match leaf_req with
+             | Request.P { name = Owned (sct, _); _ } -> [ sct ]
+             | _ -> [])
+          in
+          Some (prefix_stmt ^ leaf_stmt, extra_cts)))
   | _ -> None
 
 
@@ -170,7 +244,7 @@ let emit_qualifier_fn
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(data_points : dp_entry list)
       ((q_idx, q) : int * Qualifier.t)
-  : string
+  : string * Sctypes.t list
   =
   let needed_syms = free_syms_of_qualifier q in
   (* Positions into ALL_DPS (which is in [data_points] order); the real
@@ -183,38 +257,36 @@ let emit_qualifier_fn
   in
   let idxs_name = Printf.sprintf "Q%d_DP_IDXS" q_idx in
   let idxs_decl = emit_dp_idxs_array ~name:idxs_name valid_dp_idxs in
-  let body =
-    match render_qualifier_call ~pred_defs q with
-    | Some (pred_c_name, args) ->
-      let arg_str = String.concat ",\n          " (args @ [ "PRE"; "(void*)0" ]) in
-      Printf.sprintf
-        "    fp_setup(dp);\n\
-        \    if (sigsetjmp(fp_jmp, 1) == 0) {\n\
-        \      (void)%s(\n\
-        \          %s);\n\
-        \      fp_emit_footprint(out, %d, dp->dp_idx, FP_PREDICATE_DEPTH);\n\
-        \    } else {\n\
-        \      fp_emit_null(out, %d, dp->dp_idx);\n\
-        \    }\n\
-        \    fp_teardown();\n"
-        pred_c_name
-        arg_str
-        q_idx
-        q_idx
-    | None -> Printf.sprintf "    fp_emit_null(out, %d, dp->dp_idx);\n" q_idx
+  let body, extra_cts =
+    match render_qualifier_stmts ~pred_defs q with
+    | Some (stmts, extra_cts) ->
+      ( Printf.sprintf
+          "    fp_setup(dp);\n\
+          \    if (sigsetjmp(fp_jmp, 1) == 0) {\n\
+           %s      fp_emit_footprint(out, %d, dp->dp_idx, FP_PREDICATE_DEPTH);\n\
+          \    } else {\n\
+          \      fp_emit_null(out, %d, dp->dp_idx);\n\
+          \    }\n\
+          \    fp_teardown();\n"
+          stmts
+          q_idx
+          q_idx,
+        extra_cts )
+    | None -> (Printf.sprintf "    fp_emit_null(out, %d, dp->dp_idx);\n" q_idx, [])
   in
-  Printf.sprintf
-    "%s\n\
-     static void run_q%d(FILE *out) {\n\
-    \  for (size_t i = 0; i < %s_N; i++) {\n\
-    \    const fp_dp_t *dp = &ALL_DPS[%s[i]];\n\
-     %s  }\n\
-     }\n"
-    idxs_decl
-    q_idx
-    idxs_name
-    idxs_name
-    body
+  ( Printf.sprintf
+      "%s\n\
+       static void run_q%d(FILE *out) {\n\
+      \  for (size_t i = 0; i < %s_N; i++) {\n\
+      \    const fp_dp_t *dp = &ALL_DPS[%s[i]];\n\
+       %s  }\n\
+       }\n"
+      idxs_decl
+      q_idx
+      idxs_name
+      idxs_name
+      body,
+    extra_cts )
 
 
 (* ---------- Static dp / heap / vars tables ---------- *)
@@ -337,6 +409,10 @@ static uintptr_t fp_var_value(const fp_dp_t *dp, const char *name) {
 
 static void fp_setup(const fp_dp_t *dp) {
   fp_active_dp = dp;
+  /* Ownership-failure paths print via global_error_msg_info and abort when
+     it is NULL; give them a valid frame so they reach cn_failure (and our
+     longjmp callback) instead. */
+  initialise_error_msg_info();
   initialise_ownership_ghost_state();
   initialise_ghost_stack_depth();
   ghost_stack_depth_incr(); /* depth=1, caller frame */
@@ -436,10 +512,28 @@ let emit (input : input) : string =
   let record_defs = Records.generate_all_record_strs () in
   let c_datatype_defs = Internal.generate_c_datatypes sigm in
   let datatype_strs = String.concat "\n" (StdList.map snd c_datatype_defs) in
-  let q_fns =
+  let q_fns_and_extras =
     StdList.map
       (emit_qualifier_fn ~pred_defs:input.pred_defs ~data_points:input.data_points)
       input.qualifiers
+  in
+  let q_fns = StdList.map fst q_fns_and_extras in
+  (* Chain prefixes/leaves may need owned_<ct> functions that predicate
+     bodies alone did not induce (e.g. a wrapper struct that appears in no
+     predicate).  Generate them in addition; the generator deduplicates. *)
+  let extra_cts =
+    StdList.concat_map (fun (_, cts) -> StdList.map Sctypes.to_ctype cts) q_fns_and_extras
+  in
+  let extra_ownership_defs, extra_ownership_decls =
+    let already = !Cn_to_ail.ownership_ctypes in
+    let fresh =
+      StdList.filter
+        (fun ct -> not (StdList.exists (fun ct' -> CF.Ctype.ctypeEqual ct ct') already))
+        extra_cts
+    in
+    match fresh with
+    | [] -> ("", "")
+    | _ -> Internal.generate_ownership_functions false fresh
   in
   let b = Buffer.create 4096 in
   buf_add b "/* Auto-generated bi-abductive footprint harness. */";
@@ -464,6 +558,7 @@ let emit (input : input) : string =
   buf_add b datatype_strs;
   buf_add b "/* DECLARATIONS */";
   buf_add b ownership_function_decls;
+  buf_add b extra_ownership_decls;
   buf_add b conversion_function_decls;
   buf_add b record_fun_decls;
   buf_add b c_function_decls;
@@ -472,6 +567,7 @@ let emit (input : input) : string =
   buf_add b record_fun_defs;
   buf_add b conversion_function_defs;
   buf_add b ownership_function_defs;
+  buf_add b extra_ownership_defs;
   buf_add b c_function_defs;
   buf_add b c_predicate_defs;
   buf_add b "/* HARNESS DATA TABLES */";

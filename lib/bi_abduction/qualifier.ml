@@ -56,6 +56,34 @@ let pp_takes (q : t) : Pp.document =
   | steps -> separate_map hardline (pp_step ~named:true) steps
 
 
+(** Render a list of selected qualifiers as take lines, printing steps
+    shared between chains (same bound name and request — e.g. a common
+    [take W = RW<struct S>(b)] prefix) only once.  Prefix steps keep their
+    bound name (later lines reference it); leaf steps print [_]. *)
+let pp_takes_merged (qs : t list) : Pp.document list =
+  let open Pp in
+  let seen : (Sym.t * Request.t) list ref = ref [] in
+  let step_seen (s : step) =
+    StdList.exists (fun (n, r) -> Sym.equal n s.name && Request.equal r s.req) !seen
+  in
+  StdList.concat_map
+    (fun (q : t) ->
+       let n = StdList.length q in
+       StdList.mapi (fun i s -> (i = n - 1, s)) q
+       |> StdList.filter_map (fun (is_last, s) ->
+         if step_seen s then
+           None
+         else (
+           seen := (s.name, s.req) :: !seen;
+           Some
+             (!^"take"
+              ^^^ (if is_last then !^"_" else Sym.pp s.name)
+              ^^^ equals
+              ^^^ Request.pp s.req
+              ^^ semi))))
+    qs
+
+
 (** Compact rendering (no [take]), used in debug output. *)
 let pp (q : t) : Pp.document =
   let open Pp in
