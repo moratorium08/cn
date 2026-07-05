@@ -264,24 +264,23 @@ static void dump_heap_neighborhood(const char *phase, int dp_idx, uintptr_t addr
   sigaction(SIGBUS, &sa_old_bus, NULL);
 }
 
-/* Dump the pre-phase neighborhood of [addr] for the *current* activation,
-   once per (dp, 8-byte window).  Called on abduction events so that pointer
+/* Dump the pre-phase neighborhood of [addr] for activation [dp_idx], once
+   per (dp, 8-byte window).  Called on abduction events so that pointer
    chains reachable from missing cells are visible to the footprint harness
    even when they lie outside the argument neighborhoods. */
-static void abd_dump_pre_once(uintptr_t addr) {
-  if (heap_output == NULL || current_frame == NULL)
+static void abd_dump_pre_once(int dp_idx, uintptr_t addr) {
+  if (heap_output == NULL)
     return;
   if (abd_dumped_pre == NULL)
     abd_dumped_pre = abd_new_table();
-  int64_t key =
-      ((int64_t)current_frame->dp_idx << 48) | (int64_t)(addr & ~(uintptr_t)7);
+  int64_t key = ((int64_t)dp_idx << 48) | (int64_t)(addr & ~(uintptr_t)7);
   if (ht_get(abd_dumped_pre, &key) != NULL)
     return;
   int64_t *heap_key = malloc(sizeof(int64_t));
   *heap_key = key;
   static int64_t present = 1;
   ht_set(abd_dumped_pre, heap_key, &present);
-  dump_heap_neighborhood("pre", current_frame->dp_idx, addr);
+  dump_heap_neighborhood("pre", dp_idx, addr);
 }
 
 void cn_abd_record_event(
@@ -291,7 +290,14 @@ void cn_abd_record_event(
 
   long o = owner_depth < 0 ? 0 : owner_depth; /* UNMAPPED_VAL -> environment */
   abd_events_push((uint64_t)addr, (uint64_t)size, o, accessor_depth);
-  abd_dump_pre_once(addr);
+  /* The event lands in the anti-frame of every live activation in the
+     interval (o, d] — so each of those activations' pre-heap snapshots
+     must contain this neighborhood too (a recursive callee's misses are
+     part of the root's footprint). */
+  for (cn_abd_frame *f = current_frame; f != NULL; f = f->prev) {
+    if (o < f->depth && f->depth <= accessor_depth)
+      abd_dump_pre_once(f->dp_idx, addr);
+  }
 }
 
 void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {

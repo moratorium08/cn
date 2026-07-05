@@ -24,13 +24,13 @@ module Int64Set = Data_point.Int64Set
 module IntMap = Data_point.IntMap
 
 type inferred_qualifiers =
-  { pre : Qualifier.t list;
-    post : Qualifier.t list
+  { pre : Qualifier.t list option; (** [None] when the pre cover failed *)
+    post : Qualifier.t list option (** [None] when the post cover failed *)
   }
 
 type inferred_spec =
   { function_name : string;
-    qualifiers : inferred_qualifiers option (** [None] when cover failed. *)
+    qualifiers : inferred_qualifiers
   }
 
 (** Whether a qualifier's footprint must come from the generated C harness
@@ -321,16 +321,19 @@ let infer_function
   in
   let pre_result = infer_function_inner `Pre in
   let post_result = infer_function_inner `Post in
-  let covered (r : Cover.cover_result) =
-    IntMap.for_all (fun _ s -> Int64Set.is_empty s) r.uncovered
-  in
-  let qualifiers =
-    if covered pre_result && covered post_result then
-      Some { pre = pre_result.selected; post = post_result.selected }
+  (* Phases succeed or fail independently: a function whose precondition is
+     inferable but whose postcondition needs an unsupported anchor (e.g.
+     [return]) still gets its precondition reported. *)
+  let phase_qualifiers (r : Cover.cover_result) =
+    if IntMap.for_all (fun _ s -> Int64Set.is_empty s) r.uncovered then
+      Some r.selected
     else
       None
   in
-  { function_name = func_name; qualifiers }
+  { function_name = func_name;
+    qualifiers =
+      { pre = phase_qualifiers pre_result; post = phase_qualifiers post_result }
+  }
 
 
 (** Main entry: parse the summary + heap files and infer per function. *)
@@ -422,20 +425,23 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
            hardline
            (StdList.map (fun line -> string "  " ^^ line) (Qualifier.pp_takes_merged qs))
   in
+  let pp_phase label = function
+    | None -> Some (string (Printf.sprintf "  /* %s inference failed */" label))
+    | Some [] -> None (* nothing to add: the phase holds as written *)
+    | Some qs -> Some (pp_qualifiers label qs)
+  in
   StdList.map
     (fun spec ->
        let header =
          string (Printf.sprintf "/* Function: %s */" spec.function_name) ^^ hardline
        in
-       match spec.qualifiers with
-       | None -> header ^^ string "  /* inference failed */"
-       | Some { pre; post } ->
-         let pre_doc = pp_qualifiers "precondition" pre in
-         let post_doc =
-           match post with
-           | [] -> Pp.empty
-           | _ -> hardline ^^ pp_qualifiers "postcondition" post
-         in
-         header ^^ pre_doc ^^ post_doc)
+       let docs =
+         StdList.filter_map
+           Fun.id
+           [ pp_phase "precondition" spec.qualifiers.pre;
+             pp_phase "postcondition" spec.qualifiers.post
+           ]
+       in
+       header ^^ separate hardline docs)
     specs
   |> separate (hardline ^^ hardline)

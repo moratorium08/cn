@@ -61,7 +61,8 @@ expectations_for() {
     step0_partial_spec_b.c)
       printf '%s\n' \
         '/* Function: list_length */' \
-        '/* inference failed */'
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
       ;;
     step2_null_guard.c)
       printf '%s\n' \
@@ -71,7 +72,71 @@ expectations_for() {
     step3_chain_depth_limit.c)
       printf '%s\n' \
         '/* Function: deep_length */' \
-        '/* inference failed */'
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_list_sum.c)
+      printf '%s\n' \
+        '/* Function: list_sum */' \
+        'take _ = IntList(p);'
+      ;;
+    example_list_find.c)
+      printf '%s\n' \
+        '/* Function: list_contains */' \
+        'take _ = IntList(p);'
+      ;;
+    example_list_append.c)
+      printf '%s\n' \
+        '/* Function: list_append */' \
+        'take _ = IntList(a);' \
+        'take a_W = RW<struct node>(a);' \
+        'take _ = RW<struct node>(a_W.next);'
+      ;;
+    example_list_reverse.c)
+      printf '%s\n' \
+        '/* Function: list_reverse */' \
+        'take _ = IntList(p);' \
+        '/* postcondition inference failed */'
+      ;;
+    example_tree_sum.c)
+      printf '%s\n' \
+        '/* Function: tree_sum */' \
+        'take _ = Tree(t);'
+      ;;
+    example_tree_search.c)
+      printf '%s\n' \
+        '/* Function: bst_contains */' \
+        'take _ = Tree(t);'
+      ;;
+    example_tree_mirror.c)
+      printf '%s\n' \
+        '/* Function: tree_mirror */' \
+        'take _ = Tree(t);'
+      ;;
+    example_stack_peek.c)
+      printf '%s\n' \
+        '/* Function: stack_size */' \
+        'take s_W = RW<struct stack>(s);' \
+        'take _ = IntList(s_W.top);'
+      ;;
+    example_dlist_length.c)
+      printf '%s\n' \
+        '/* Function: dlist_length */' \
+        'take _ = DList(p);'
+      ;;
+    example_rotate3.c)
+      printf '%s\n' \
+        '/* Function: rotate3 */' \
+        'take _ = RW<signed int>(a);' \
+        'take _ = RW<signed int>(b);' \
+        'take _ = RW<signed int>(c);'
+      ;;
+    example_list_min_max.c)
+      printf '%s\n' \
+        '/* Function: list_min_max */' \
+        'take _ = IntList(p);' \
+        'take _ = RW<signed int>(out_min);' \
+        'take _ = RW<signed int>(out_max);'
       ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
@@ -227,6 +292,17 @@ main() {
       step0_partial_spec_b.c
       step2_null_guard.c
       step3_chain_depth_limit.c
+      example_list_sum.c
+      example_list_find.c
+      example_list_append.c
+      example_list_reverse.c
+      example_tree_sum.c
+      example_tree_search.c
+      example_tree_mirror.c
+      example_stack_peek.c
+      example_dlist_length.c
+      example_rotate3.c
+      example_list_min_max.c
     )
   fi
 

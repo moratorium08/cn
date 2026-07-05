@@ -471,6 +471,9 @@ let emit_main (qualifiers : (int * Qualifier.t) list) (output_json_path : string
   let b = Buffer.create 256 in
   buf_add b "int main(void) {";
   buf_add b "  fulminate_init();";
+  (* Candidate rejection is expected and handled via the failure callback;
+     don't let the runtime narrate each rejected qualifier. *)
+  buf_add b "  set_cn_logging_level(CN_LOGGING_NONE);";
   buf_add b (Printf.sprintf "  FILE* out = fopen(\"%s\", \"w\");" output_json_path);
   buf_add b "  if (!out) { perror(\"fp harness fopen\"); return 2; }";
   buf_add b "  fputs(\"{\\\"results\\\":[\", out);";
