@@ -53,6 +53,7 @@ let compute (qualifier : Qualifier.t) (dp : Data_point.data_point) : Int64Set.t 
   match Qualifier.singleton_req qualifier with
   | Some (Request.P { name = Owned (ct, _init); pointer; iargs = _ }) ->
     (match eval_pointer_term pointer dp.pre_vars with
+     | Some 0L -> None (* W(NULL) has no derivation: the footprint is ⊥ *)
      | Some addr -> Some (owned_footprint ~ct ~base_addr:addr)
      | None -> None)
   | Some (Request.P { name = PName _; _ }) -> None

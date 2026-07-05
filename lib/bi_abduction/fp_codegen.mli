@@ -33,10 +33,8 @@ type input =
     prog5 : unit Mucore.file;
     pred_defs : Definition.Predicate.t Sym.Map.t;
     data_points : dp_entry list;
-      (** All data points the harness should sweep over.  Today the
-            inference layer passes a singleton (the representative dp);
-            the codegen is structured so this can grow to N entries
-            without a code change. *)
+      (** All data points the harness should sweep over — one per
+            activation of the function, each with its own heap snapshot. *)
     qualifiers : (int * Qualifier.t) list;
       (** [(q_idx, qualifier)] pairs.  Only [Request.P] with [PName _]
             should appear here. *)

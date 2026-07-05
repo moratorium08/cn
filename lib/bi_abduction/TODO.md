@@ -5,24 +5,17 @@ dp-keyed wire schema with `owned`/`post.vars`, the `B` overlap filter, and the
 chain-shaped `Qualifier.t` — is done; sections below have been pruned
 accordingly.)*
 
-## Critical: Multiple executions are not generalised
+## Multiple executions — done (PLAN.md Step 2)
 
-**Baseline status:** the implementation now intentionally infers from **one
-representative execution** only. This avoids mixing incompatible concrete
-addresses from distinct runs, but it also means extra executions are currently
-ignored rather than generalised.
+Inference is now data-relative across all activations: candidates must
+evaluate on every data point (`F ≠ ⊥`), respect every data point's upper
+bound, and Cover works on per-dp footprint maps with a least
+over-approximation tie-break (`step2_null_guard.c`,
+`baseline_multi_call_list.c`).
 
-This keeps the baseline concrete and readable, but it leaves important value on
-the table:
-
-- different calls may exercise different shapes (e.g. length-1 vs length-3),
-- base cases may be the only runs where some boundary iargs are visible,
-- and confidence should grow when multiple runs agree on the same qualifier.
-
-**Future fix**: compute cover per data point, then combine the selected
-qualifiers by intersection, voting, or another simple consensus rule. Longer
-term, the concrete heaps from several runs could be merged into a more
-structured shape abstraction.
+Remaining refinement: candidate *scoring* could reward agreement across runs
+explicitly (today more runs only constrain; they don't rank), and PBT/Bennet
+integration would multiply data-point diversity.
 
 
 ## Partial specifications

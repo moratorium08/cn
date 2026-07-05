@@ -63,6 +63,11 @@ expectations_for() {
         '/* Function: list_length */' \
         '/* inference failed */'
       ;;
+    step2_null_guard.c)
+      printf '%s\n' \
+        '/* Function: first_val */' \
+        'take _ = IntList(p);'
+      ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
         '/* Function: sum_pair */' \
@@ -123,6 +128,11 @@ forbidden_for() {
       # IntList(p) overlaps the node the user's spec already owns
       # (sandwich upper bound B); it must not be suggested.
       printf 'take _ = IntList(p);'
+      ;;
+    step2_null_guard.c)
+      # RW<struct node>(p) is undefined on the NULL activation, so (†)
+      # rejects it; only the guarded predicate may be suggested.
+      printf 'take _ = RW<struct node>(p);'
       ;;
     *)
       ;;
@@ -202,6 +212,7 @@ main() {
       extra_wrong_struct_type.c
       step0_interval_owner.c
       step0_partial_spec_b.c
+      step2_null_guard.c
     )
   fi
 

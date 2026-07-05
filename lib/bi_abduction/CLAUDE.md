@@ -35,7 +35,7 @@ Entry points:
 - **Predicate footprints come from real CN semantics** — each candidate predicate is generated to a C function via Fulminate, then run in PRE mode. The set of byte addresses claimed in the ghost state at the predicate's depth is the footprint. Wrong candidates self-eject via `cn_failure` (assertion violations, ownership mismatches, NULL dereference).
 - **Cross-platform memory access via `cn_load_hook`** — the harness installs a hook that redirects each predicate-body dereference (the `*ptr` inside the generated `owned_T`) into the recorded heap dump, instead of mmapping fixed addresses. Default behaviour (hook == NULL) is byte-equivalent to `*p`, so non-bi-abd builds are unaffected.
 - **Failure escape via `cn_failure_callback` + `sigsetjmp`** — the harness installs a callback that `siglongjmp`s out, so a wrong qualifier maps cleanly to `footprint = None` instead of crashing the process. No SIGSEGV path.
-- **Representative execution baseline** — inference currently works from one representative data point, chosen as the call with the richest missing set. Multi-run generalisation is intentionally left to `TODO.md`.
+- **Data-relative inference across all activations** — condition (†) from the paper: a candidate must evaluate (`F ≠ ⊥`) on *every* data point of the function, stay within every data point's upper bound `B`, and Cover must cover every data point's lower bound `A` disjointly (per-dp footprint maps in `cover.ml`; ties broken by least over-approximation `Σ_j |F_j \ A_j|`). This is what forces guarded predicates over bare `RW` when a function is also exercised with NULL (`step2_null_guard.c`).
 - **Naive enumeration, semantic filtering** — the enumerator emits every well-typed candidate (no heap-shape heuristics, no root-type matching). The harness is the filter: candidates whose predicate body the observed memory cannot satisfy simply produce `None`.
 
 ## CN/Cerberus conventions to know
@@ -103,7 +103,6 @@ The inference modules use `Pp.debug` at these levels:
 
 See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 
-- **Multiple executions are not generalised yet** — the baseline uses one representative run and ignores the others (the wire format, harness tables and `Fp_table` are already per-dp; only `infer.ml`/`cover.ml` collapse to one)
 - **Chains are type-only** — `Qualifier.t` is chain-shaped but the enumerator only emits singletons; the harness renders only singletons
 - **No iterated resources (`each`), free/malloc, loop invariants**
 - **`return` is recorded but not yet used as a candidate anchor**

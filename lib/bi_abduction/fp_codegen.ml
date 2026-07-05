@@ -159,7 +159,9 @@ let emit_dp_idxs_array ~(name : string) (idxs : int list) : string =
   let b = Buffer.create 64 in
   Buffer.add_string b (Printf.sprintf "static const int %s[] = {" name);
   StdList.iter (fun i -> Buffer.add_string b (Printf.sprintf " %d," i)) idxs;
-  buf_add b " };";
+  (* sentinel keeps the initializer non-empty (empty initializers are not
+     standard C); _N is the real count *)
+  buf_add b " -1 };";
   buf_add b (Printf.sprintf "static const size_t %s_N = %d;" name (StdList.length idxs));
   Buffer.contents b
 
@@ -232,6 +234,9 @@ let emit_dp_tables (data_points : dp_entry list) : string =
     \  const fp_heap_word_t *heap; size_t heap_n;\n\
     \  const fp_var_t       *vars; size_t vars_n;\n\
      } fp_dp_t;";
+  (* Both tables end with a sentinel row so the initializer is never empty
+     (a NULL-call dp has no heap words; an argument-less function has no
+     vars); the explicit _N counts exclude the sentinel. *)
   StdList.iter
     (fun (e : dp_entry) ->
        Buffer.add_string
@@ -241,14 +246,13 @@ let emit_dp_tables (data_points : dp_entry list) : string =
          (fun (a, v) ->
             Buffer.add_string b (Printf.sprintf "\n  { 0x%LxUL, 0x%LxUL }," a v))
          e.heap_words;
-       buf_add b "\n};";
+       buf_add b "\n  { 0, 0 }\n};";
        buf_add
          b
          (Printf.sprintf
-            "static const size_t HEAP_DP%d_N = sizeof HEAP_DP%d / sizeof HEAP_DP%d[0];"
+            "static const size_t HEAP_DP%d_N = %d;"
             e.dp_idx
-            e.dp_idx
-            e.dp_idx);
+            (StdList.length e.heap_words));
        Buffer.add_string
          b
          (Printf.sprintf "static const fp_var_t VARS_DP%d[] = {" e.dp_idx);
@@ -258,14 +262,13 @@ let emit_dp_tables (data_points : dp_entry list) : string =
               b
               (Printf.sprintf "\n  { \"%s\", 0x%LxUL, %d }," v.name v.value v.size))
          e.dp.pre_vars;
-       buf_add b "\n};";
+       buf_add b "\n  { 0, 0, 0 }\n};";
        buf_add
          b
          (Printf.sprintf
-            "static const size_t VARS_DP%d_N = sizeof VARS_DP%d / sizeof VARS_DP%d[0];"
+            "static const size_t VARS_DP%d_N = %d;"
             e.dp_idx
-            e.dp_idx
-            e.dp_idx))
+            (StdList.length e.dp.pre_vars)))
     data_points;
   Buffer.add_string b "static const fp_dp_t ALL_DPS[] = {";
   StdList.iter

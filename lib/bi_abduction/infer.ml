@@ -8,14 +8,20 @@
     Predicate qualifiers get their footprints from a generated C harness
     ([Fp_codegen]) compiled and run by [Fp_runner].
 
+    Inference is data-relative across *all* activations (paper, condition
+    (†)): a candidate must evaluate (F ≠ ⊥) on every data point, stay within
+    every data point's upper bound B, and the selected candidates must cover
+    every data point's lower bound A disjointly.
+
     Debug output via [Pp.debug]:
     - Level 2: pipeline stages
-    - Level 3: data point details, representative selection
-    - Level 4: enumeration / harness results
+    - Level 3: per-data-point details, must-cover sets, cover results
+    - Level 4: enumeration / harness results, rejected candidates
     - Level 5: per-qualifier footprints, cover steps *)
 
 module StdList = Stdlib.List
 module Int64Set = Data_point.Int64Set
+module IntMap = Data_point.IntMap
 
 type inferred_qualifiers =
   { pre : Qualifier.t list;
@@ -49,40 +55,23 @@ let infer_function
   Pp.debug 2 (lazy (headline ("bi-abd: inferring specs for " ^ func_name)));
   Pp.debug 3 (lazy (item "data points" (Pp.int (StdList.length dps))));
   let loc = Locations.other __FUNCTION__ in
-  (* Baseline: pick the dp with the richest missing set as the representative. *)
-  let representative_dp =
-    StdList.fold_left
-      (fun best (dp : Data_point.data_point) ->
-         let n = StdList.length dp.body_missing + StdList.length dp.post_remaining in
-         let best_n =
-           StdList.length best.Data_point.body_missing
-           + StdList.length best.Data_point.post_remaining
-         in
-         if n > best_n then dp else best)
-      (StdList.hd dps)
-      dps
-  in
-  Pp.debug
-    3
-    (lazy
-      (let body_n = StdList.length representative_dp.Data_point.body_missing in
-       let post_n = StdList.length representative_dp.Data_point.post_remaining in
-       item
-         "representative data point"
-         (!^"body_missing:" ^^^ Pp.int body_n ^^^ !^"post_remaining:" ^^^ Pp.int post_n)));
-  Pp.debug
-    3
-    (lazy
-      (item
-         "variables"
-         (separate_map
-            (comma ^^ space)
-            (fun (v : Data_point.var_binding) ->
-               !^(v.name)
-               ^^^ !^"="
-               ^^^ !^(Printf.sprintf "0x%Lx" v.value)
-               ^^^ !^(Printf.sprintf "(%d bytes)" v.size))
-            representative_dp.Data_point.pre_vars)));
+  StdList.iter
+    (fun (dp : Data_point.data_point) ->
+       Pp.debug
+         3
+         (lazy
+           (item
+              (Printf.sprintf "dp %d" dp.dp_idx)
+              (!^(Printf.sprintf
+                    "A: %d entries, L: %d entries;"
+                    (StdList.length dp.body_missing)
+                    (StdList.length dp.post_remaining))
+               ^^^ separate_map
+                     (comma ^^ space)
+                     (fun (v : Data_point.var_binding) ->
+                        !^(v.name) ^^^ !^"=" ^^^ !^(Printf.sprintf "0x%Lx" v.value))
+                     dp.pre_vars))))
+    dps;
   let signature_arg_type name : Sctypes.t = StdList.assoc name signature_args in
   let arg_of_var (v : Data_point.var_binding) : Enumerator.arg =
     let sym = Sym.fresh v.name in
@@ -99,7 +88,9 @@ let infer_function
            func_name
            (Pp.plain (Sctypes.pp ct)))
   in
-  let args = StdList.map arg_of_var representative_dp.pre_vars in
+  (* All activations of a function share its signature; take scope from the
+     first data point. *)
+  let args = StdList.map arg_of_var (StdList.hd dps).pre_vars in
   let candidates_raw = Enumerator.enumerate ~config ~args ~pred_defs ~loc in
   Pp.debug
     4
@@ -120,30 +111,41 @@ let infer_function
       (item
          "predicate qualifiers"
          (Pp.int (StdList.length pred_qualifiers) ^^^ !^"to harness")));
-  (* Today the harness sweeps over a singleton [dp_entry] (the
-     representative dp).  Adding more dps here is a pure data change
-     — the codegen and lookup are already keyed on dp_idx. *)
+  (* The harness sweeps over every activation, each against its own heap
+     snapshot; results are keyed by (q_idx, dp_idx). *)
   let run_harness ~tag ~(heaps : Data_point.heap_dumps_by_dp) : Fp_table.t =
-    let heap_words = Data_point.heap_words_for_dp heaps representative_dp.dp_idx in
+    let data_points =
+      StdList.map
+        (fun (dp : Data_point.data_point) ->
+           { Fp_codegen.dp_idx = dp.dp_idx;
+             dp;
+             heap_words = Data_point.heap_words_for_dp heaps dp.dp_idx
+           })
+        dps
+    in
     Footprint.compute_predicate_table
       ~harness
       ~tag
       ~func_name
       ~pred_defs
-      ~data_points:
-        [ { dp_idx = representative_dp.dp_idx; dp = representative_dp; heap_words } ]
+      ~data_points
       ~qualifiers:pred_qualifiers
   in
   let pre_fp_table = run_harness ~tag:"pre" ~heaps:pre_heaps in
   let post_fp_table = run_harness ~tag:"post" ~heaps:post_heaps in
-  let footprint_of ~(fp_table : Fp_table.t) (q_idx, q) : Int64Set.t option =
-    Footprint.lookup ~dp:representative_dp ~fp_table (q_idx, q)
-  in
   (* Sandwich upper bound: an inferred assertion is *-conjoined with the
-     user's specification, so its footprint must avoid what the activation
-     already owned after the user precondition (owned_pre = user footprint
-     + parameter/local cells); F ⊆ B_j reads as F ∩ owned_pre = ∅. *)
-  let owned_pre_set = Data_point.missing_addr_set representative_dp.owned_pre in
+     user's specification, so on every data point its footprint must avoid
+     what the activation already owned after the user precondition
+     (owned_pre = user footprint + parameter/local cells); F ⊆ B_j reads as
+     F ∩ owned_pre_j = ∅.  (At post this uses the pre snapshot as an
+     approximation of the user's postcondition footprint.) *)
+  let owned_pre_sets : Int64Set.t IntMap.t =
+    StdList.fold_left
+      (fun acc (dp : Data_point.data_point) ->
+         IntMap.add dp.dp_idx (Data_point.missing_addr_set dp.owned_pre) acc)
+      IntMap.empty
+      dps
+  in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
     let phase_label, select_missing, fp_table =
       match phase with
@@ -152,44 +154,98 @@ let infer_function
       | `Post ->
         ("post", (fun (dp : Data_point.data_point) -> dp.post_remaining), post_fp_table)
     in
-    let must_cover = Data_point.missing_addr_set (select_missing representative_dp) in
+    (* The lower bounds A_j, one per activation. *)
+    let must_cover : Int64Set.t IntMap.t =
+      StdList.fold_left
+        (fun acc (dp : Data_point.data_point) ->
+           IntMap.add dp.dp_idx (Data_point.missing_addr_set (select_missing dp)) acc)
+        IntMap.empty
+        dps
+    in
     Pp.debug
       3
       (lazy
         (item
            (phase_label ^ " must-cover")
-           (Pp.int (Int64Set.cardinal must_cover) ^^^ !^"bytes")));
+           (separate_map
+              (comma ^^ space)
+              (fun (dp_idx, a) ->
+                 !^(Printf.sprintf "dp %d: %d bytes" dp_idx (Int64Set.cardinal a)))
+              (IntMap.bindings must_cover))));
+    (* Condition (†), applied per candidate:
+       - F(q, d_j) ≠ ⊥ for every data point j (a qualifier that fails to
+         evaluate on any observed execution cannot be part of the spec);
+       - F(q, d_j) ∩ owned_pre_j = ∅ for every j (upper bound);
+       - it helps somewhere: Σ_j |F(q, d_j) ∩ A_j| > 0 (removable
+         heuristic; base-case activations with A_j = ∅ impose no demand). *)
     let candidates =
       StdList.filter_map
         (fun (q_idx, q) ->
-           match footprint_of ~fp_table (q_idx, q) with
-           | Some fp when not (Int64Set.is_empty (Int64Set.inter fp owned_pre_set)) ->
-             (* Violates the upper bound B_j: overlaps ownership the user's
-                specification already claims.  (At post this uses the pre
-                snapshot as an approximation of the user's postcondition
-                footprint.) *)
-             Pp.debug
-               4
-               (lazy
-                 (item
-                    ("  " ^ phase_label ^ " rejected (overlaps user-owned)")
-                    (Qualifier.pp q)));
-             None
-           | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
-             let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
+           let fps =
+             StdList.map
+               (fun (dp : Data_point.data_point) ->
+                  (dp.dp_idx, Footprint.lookup ~dp ~fp_table (q_idx, q)))
+               dps
+           in
+           if StdList.exists (fun (_, fp) -> Option.is_none fp) fps then (
              Pp.debug
                5
                (lazy
                  (item
-                    ("  " ^ phase_label ^ " footprint")
-                    (Qualifier.pp q
-                     ^^^ !^"->"
-                     ^^^ Pp.int (Int64Set.cardinal fp)
-                     ^^^ !^"bytes,"
-                     ^^^ Pp.int covers
-                     ^^^ !^"covering must")));
-             Some { Cover.qualifier = q; footprint = fp }
-           | _ -> None)
+                    ("  " ^ phase_label ^ " rejected (undefined on some dp)")
+                    (Qualifier.pp q)));
+             None)
+           else (
+             let footprints =
+               StdList.fold_left
+                 (fun acc (dp_idx, fp) -> IntMap.add dp_idx (Option.get fp) acc)
+                 IntMap.empty
+                 fps
+             in
+             let overlaps_owned =
+               IntMap.exists
+                 (fun dp_idx fp ->
+                    match IntMap.find_opt dp_idx owned_pre_sets with
+                    | None -> false
+                    | Some owned -> not (Int64Set.is_empty (Int64Set.inter owned fp)))
+                 footprints
+             in
+             let help =
+               IntMap.fold
+                 (fun dp_idx fp acc ->
+                    match IntMap.find_opt dp_idx must_cover with
+                    | None -> acc
+                    | Some a -> acc + Int64Set.cardinal (Int64Set.inter a fp))
+                 footprints
+                 0
+             in
+             if overlaps_owned then (
+               Pp.debug
+                 4
+                 (lazy
+                   (item
+                      ("  " ^ phase_label ^ " rejected (overlaps user-owned)")
+                      (Qualifier.pp q)));
+               None)
+             else if help = 0 then
+               None
+             else (
+               Pp.debug
+                 5
+                 (lazy
+                   (item
+                      ("  " ^ phase_label ^ " footprint")
+                      (Qualifier.pp q
+                       ^^^ !^"->"
+                       ^^^ separate_map
+                             (comma ^^ space)
+                             (fun (dp_idx, fp) ->
+                                !^(Printf.sprintf
+                                     "dp %d: %d bytes"
+                                     dp_idx
+                                     (Int64Set.cardinal fp)))
+                             (IntMap.bindings footprints))));
+               Some { Cover.qualifier = q; footprints })))
         candidates_indexed
     in
     Pp.debug
@@ -203,7 +259,9 @@ let infer_function
       3
       (lazy
         (let n_sel = StdList.length result.selected in
-         let n_uncov = Int64Set.cardinal result.uncovered in
+         let n_uncov =
+           IntMap.fold (fun _ s acc -> acc + Int64Set.cardinal s) result.uncovered 0
+         in
          item
            (phase_label ^ " cover result")
            (Pp.int n_sel ^^^ !^"selected," ^^^ Pp.int n_uncov ^^^ !^"uncovered")));
@@ -211,9 +269,11 @@ let infer_function
   in
   let pre_result = infer_function_inner `Pre in
   let post_result = infer_function_inner `Post in
+  let covered (r : Cover.cover_result) =
+    IntMap.for_all (fun _ s -> Int64Set.is_empty s) r.uncovered
+  in
   let qualifiers =
-    if Int64Set.is_empty pre_result.uncovered && Int64Set.is_empty post_result.uncovered
-    then
+    if covered pre_result && covered post_result then
       Some { pre = pre_result.selected; post = post_result.selected }
     else
       None

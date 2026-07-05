@@ -186,9 +186,16 @@ Programs for which `cn bi-abd file.c` produces a correct suggestion today
 > support added to `run-bi-abd.sh`), `step0_partial_spec_b.c` (B filter),
 > and `baseline_multi_call_list.c` flipped from `inference failed` to
 > `IntList(p)`.  The remaining steps below should be read with Step 1
-> reinterpreted as harness-based (done) and Step 2 reduced to: multi-dp
-> Cover + representative-dp removal (its runtime/data prerequisites are
-> now in place).
+> reinterpreted as harness-based (done).
+>
+> **Step 2 (done):** inference is data-relative across all activations —
+> the representative-dp collapse is gone.  The harness sweeps every dp
+> against its own heap snapshot; condition (†) is applied per candidate
+> (`F ≠ ⊥` on every dp, `F ∩ owned_pre_j = ∅` on every dp); `Cover`
+> works on per-dp footprint maps with per-dp disjointness and a least
+> over-approximation tie-break (`Σ_j |F_j \ A_j|`).  `Owned` footprints
+> are ⊥ at NULL, so base-case activations reject unguarded `RW`
+> candidates in favour of guarded predicates (`step2_null_guard.c`).
 
 Five steps, each independently landable, each leaving `tests/run-bi-abd.sh`
 green (with deliberate expectation updates) and the standard suites
