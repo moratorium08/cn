@@ -854,9 +854,7 @@ let generate_get_or_put_ownership_function ~without_ownership_checking ctype
       let loaded_binding = create_binding loaded_sym ctype in
       let loaded_decl = A.(AilSdeclaration [ (loaded_sym, None) ]) in
       let load_fn_sym = Sym.fresh "cn_owned_load" in
-      let loaded_addr =
-        mk_expr A.(AilEunary (Address, mk_expr (AilEident loaded_sym)))
-      in
+      let loaded_addr = mk_expr A.(AilEunary (Address, mk_expr (AilEident loaded_sym))) in
       let load_args =
         [ mk_expr A.(AilEident generic_c_ptr_sym);
           mk_expr A.(AilEsizeof (C.no_qualifiers, ctype));
@@ -865,9 +863,7 @@ let generate_get_or_put_ownership_function ~without_ownership_checking ctype
         ]
       in
       let load_call =
-        A.(
-          AilSexpr
-            (mk_expr (AilEcall (mk_expr (AilEident load_fn_sym), load_args))))
+        A.(AilSexpr (mk_expr (AilEcall (mk_expr (AilEident load_fn_sym), load_args))))
       in
       ([ loaded_binding ], [ loaded_decl; load_call ], A.AilEident loaded_sym))
   in

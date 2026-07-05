@@ -62,8 +62,7 @@ let extract_function_args (sigm : _ A.sigma) : (string * (string * Sctypes.t) li
               fn_name
               bad_name;
             None
-          | None ->
-            Some (fn_name, List.map (fun (n, opt) -> (n, Option.get opt)) params))
+          | None -> Some (fn_name, List.map (fun (n, opt) -> (n, Option.get opt)) params))
        | _ -> None)
     sigm.A.function_definitions
 

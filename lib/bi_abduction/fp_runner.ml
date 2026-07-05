@@ -27,8 +27,7 @@ let parse_results_json (path : string) : (int * int * Int64Set.t option) list =
          let int_field name =
            match StdList.assoc_opt name fields with
            | Some (`Int n) -> n
-           | _ ->
-             failwith (Printf.sprintf "fp_runner: entry missing integer '%s'" name)
+           | _ -> failwith (Printf.sprintf "fp_runner: entry missing integer '%s'" name)
          in
          let q_idx = int_field "q" in
          let dp_idx = int_field "dp" in
@@ -95,9 +94,7 @@ let run
   Pp.debug 4 (lazy (Pp.item "fp harness emitted" (Pp.string src_path)));
   let include_flag = "-I" ^ Filename.concat cn_runtime_prefix "include" in
   let lib_path = Filename.concat cn_runtime_prefix "libcn_exec.a" in
-  let cflags =
-    String.concat " " [ "-g"; "-O0"; "-Wno-error" ]
-  in
+  let cflags = String.concat " " [ "-g"; "-O0"; "-Wno-error" ] in
   let compile_cmd =
     Printf.sprintf
       "%s %s -c %s %s -o %s 2>&1"
@@ -119,9 +116,7 @@ let run
         cflags
         include_flag
         (Filename.quote exe_path)
-        (Filename.quote obj_path
-         ^ " "
-         ^ Filename.quote lib_path)
+        (Filename.quote obj_path ^ " " ^ Filename.quote lib_path)
     in
     Pp.debug 5 (lazy (Pp.item "fp harness link" (Pp.string link_cmd)));
     if Sys.command link_cmd <> 0 then (
@@ -131,10 +126,10 @@ let run
       let run_cmd = Filename.quote exe_path ^ " 2>&1" in
       Pp.debug 5 (lazy (Pp.item "fp harness run" (Pp.string run_cmd)));
       let exit_code = Sys.command run_cmd in
-      if exit_code <> 0 then (
+      if exit_code <> 0 then
         Printf.eprintf
           "fp_runner: harness exited %d, partial results may be missing\n"
-          exit_code);
+          exit_code;
       if not (Sys.file_exists json_path) then (
         Printf.eprintf "fp_runner: no JSON output at %s\n" json_path;
         Fp_table.empty)
@@ -152,7 +147,5 @@ let run
           4
           (lazy
             (let open Pp in
-             item
-               "fp harness results"
-               (int (StdList.length results) ^^^ !^"entries")));
+             item "fp harness results" (int (StdList.length results) ^^^ !^"entries")));
         Fp_table.of_results results)))

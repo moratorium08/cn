@@ -33,15 +33,14 @@ type input =
     prog5 : unit Mucore.file;
     pred_defs : Definition.Predicate.t Sym.Map.t;
     data_points : dp_entry list;
-        (** All data points the harness should sweep over.  Today the
+      (** All data points the harness should sweep over.  Today the
             inference layer passes a singleton (the representative dp);
             the codegen is structured so this can grow to N entries
             without a code change. *)
     qualifiers : (int * Qualifier.t) list;
-        (** [(q_idx, qualifier)] pairs.  Only [Request.P] with [PName _]
+      (** [(q_idx, qualifier)] pairs.  Only [Request.P] with [PName _]
             should appear here. *)
-    output_json_path : string
-        (** File the harness should write JSON results to. *)
+    output_json_path : string (** File the harness should write JSON results to. *)
   }
 
 (** Emit the full harness C source. *)

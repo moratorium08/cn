@@ -40,7 +40,6 @@ let rec bt_to_internal : BaseTypes.t -> BT.t = function
   | BaseTypes.Option bt -> BT.Option (bt_to_internal bt)
 
 
-
 let arg_term ~(loc : Locations.t) (arg : arg) : IT.t =
   IT.sym_ (arg.sym, bt_to_internal arg.bt, loc)
 
@@ -49,7 +48,10 @@ let bits_constants (sign, sz) loc : IT.t list =
   [ 0; 1; -1 ]
   |> StdList.filter_map (fun n ->
     let z = Z.of_int n in
-    if BT.fits_range (sign, sz) z then Some (IT.num_lit_ z (BT.Bits (sign, sz)) loc) else None)
+    if BT.fits_range (sign, sz) z then
+      Some (IT.num_lit_ z (BT.Bits (sign, sz)) loc)
+    else
+      None)
 
 
 (** Simple literal choices used for predicate iargs.  These are deliberately
@@ -68,13 +70,15 @@ let constant_choices_for_bt ~(loc : Locations.t) (bt : BaseTypes.t) : IT.t list 
 
 (** Generate all terms matching a requested base type from in-scope arguments
     and small constants. *)
-let choices_for_bt ~(args : arg list) ~(loc : Locations.t) ~(bt : BaseTypes.t) : IT.t list =
+let choices_for_bt ~(args : arg list) ~(loc : Locations.t) ~(bt : BaseTypes.t) : IT.t list
+  =
   let arg_choices =
     args
     |> StdList.filter (fun (arg : arg) -> BaseTypes.equal arg.bt bt)
     |> StdList.map (arg_term ~loc)
   in
   arg_choices @ constant_choices_for_bt ~loc bt
+
 
 (** Generate Owned qualifiers from the actual pointee type of each pointer
     argument. *)
@@ -92,8 +96,7 @@ let owned_qualifiers ~(args : arg list) ~(loc : Locations.t) : Qualifier.t list 
 let dedup (qs : Qualifier.t list) : Qualifier.t list =
   StdList.rev
     (StdList.fold_left
-       (fun acc q ->
-          if StdList.exists (Qualifier.equal q) acc then acc else q :: acc)
+       (fun acc q -> if StdList.exists (Qualifier.equal q) acc then acc else q :: acc)
        []
        qs)
 
