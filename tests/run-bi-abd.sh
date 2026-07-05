@@ -138,6 +138,42 @@ expectations_for() {
         'take _ = RW<signed int>(out_min);' \
         'take _ = RW<signed int>(out_max);'
       ;;
+    example_hard_array_fill.c)
+      printf '%s\n' \
+        '/* Function: array_fill */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_hard_listseg_boundary.c)
+      printf '%s\n' \
+        '/* Function: walk3 */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_hard_ptr_chain.c)
+      printf '%s\n' \
+        '/* Function: deref2 */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_hard_malloc_constructor.c)
+      printf '%s\n' \
+        '/* Function: mk_node */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_hard_global_counter.c)
+      printf '%s\n' \
+        '/* Function: tick */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    example_hard_cycle.c)
+      printf '%s\n' \
+        '/* Function: cycle_length */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
         '/* Function: sum_pair */' \
@@ -303,6 +339,12 @@ main() {
       example_dlist_length.c
       example_rotate3.c
       example_list_min_max.c
+      example_hard_array_fill.c
+      example_hard_listseg_boundary.c
+      example_hard_ptr_chain.c
+      example_hard_malloc_constructor.c
+      example_hard_global_counter.c
+      example_hard_cycle.c
     )
   fi
 
