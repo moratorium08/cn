@@ -28,8 +28,8 @@ type inferred_spec =
   }
 
 let is_predicate_qualifier (q : Qualifier.t) : bool =
-  match q with
-  | Request.P { name = PName _; _ } -> true
+  match Qualifier.singleton_req q with
+  | Some (Request.P { name = PName _; _ }) -> true
   | _ -> false
 
 
@@ -39,8 +39,8 @@ let infer_function
       ~(harness : Footprint.harness_ctx)
       ~(pred_defs : Definition.Predicate.t Sym.Map.t)
       ~(signature_args : (string * Sctypes.t) list)
-      ~(pre_heap_words : (int64 * int64) list)
-      ~(post_heap_words : (int64 * int64) list)
+      ~(pre_heaps : Data_point.heap_dumps_by_dp)
+      ~(post_heaps : Data_point.heap_dumps_by_dp)
       ~(func_name : string)
       ~(dps : Data_point.data_point list)
   : inferred_spec
@@ -90,8 +90,7 @@ let infer_function
     | Sctypes.Pointer ((Sctypes.Void | Sctypes.Function _) as _ct) ->
       { sym; bt = BaseTypes.Loc (); owned_ct = None }
     | Sctypes.Pointer ct -> { sym; bt = BaseTypes.Loc (); owned_ct = Some ct }
-    | Sctypes.Integer _ | Sctypes.Byte ->
-      { sym; bt = BaseTypes.Integer; owned_ct = None }
+    | Sctypes.Integer _ | Sctypes.Byte -> { sym; bt = BaseTypes.Integer; owned_ct = None }
     | ct ->
       failwith
         (Printf.sprintf
@@ -124,34 +123,34 @@ let infer_function
   (* Today the harness sweeps over a singleton [dp_entry] (the
      representative dp).  Adding more dps here is a pure data change
      — the codegen and lookup are already keyed on dp_idx. *)
-  let representative_dp_idx = 0 in
-  let run_harness ~tag ~heap_words : Fp_table.t =
+  let run_harness ~tag ~(heaps : Data_point.heap_dumps_by_dp) : Fp_table.t =
+    let heap_words = Data_point.heap_words_for_dp heaps representative_dp.dp_idx in
     Footprint.compute_predicate_table
       ~harness
       ~tag
       ~func_name
       ~pred_defs
-      ~data_points:[ { dp_idx = representative_dp_idx; dp = representative_dp; heap_words } ]
+      ~data_points:
+        [ { dp_idx = representative_dp.dp_idx; dp = representative_dp; heap_words } ]
       ~qualifiers:pred_qualifiers
   in
-  let pre_fp_table = run_harness ~tag:"pre" ~heap_words:pre_heap_words in
-  let post_fp_table = run_harness ~tag:"post" ~heap_words:post_heap_words in
+  let pre_fp_table = run_harness ~tag:"pre" ~heaps:pre_heaps in
+  let post_fp_table = run_harness ~tag:"post" ~heaps:post_heaps in
   let footprint_of ~(fp_table : Fp_table.t) (q_idx, q) : Int64Set.t option =
-    Footprint.lookup
-      ~representative_dp
-      ~representative_dp_idx
-      ~fp_table
-      (q_idx, q)
+    Footprint.lookup ~dp:representative_dp ~fp_table (q_idx, q)
   in
+  (* Sandwich upper bound: an inferred assertion is *-conjoined with the
+     user's specification, so its footprint must avoid what the activation
+     already owned after the user precondition (owned_pre = user footprint
+     + parameter/local cells); F ⊆ B_j reads as F ∩ owned_pre = ∅. *)
+  let owned_pre_set = Data_point.missing_addr_set representative_dp.owned_pre in
   let infer_function_inner (phase : [ `Pre | `Post ]) : Cover.cover_result =
     let phase_label, select_missing, fp_table =
       match phase with
       | `Pre ->
         ("pre", (fun (dp : Data_point.data_point) -> dp.body_missing), pre_fp_table)
       | `Post ->
-        ( "post",
-          (fun (dp : Data_point.data_point) -> dp.post_remaining),
-          post_fp_table )
+        ("post", (fun (dp : Data_point.data_point) -> dp.post_remaining), post_fp_table)
     in
     let must_cover = Data_point.missing_addr_set (select_missing representative_dp) in
     Pp.debug
@@ -164,6 +163,18 @@ let infer_function
       StdList.filter_map
         (fun (q_idx, q) ->
            match footprint_of ~fp_table (q_idx, q) with
+           | Some fp when not (Int64Set.is_empty (Int64Set.inter fp owned_pre_set)) ->
+             (* Violates the upper bound B_j: overlaps ownership the user's
+                specification already claims.  (At post this uses the pre
+                snapshot as an approximation of the user's postcondition
+                footprint.) *)
+             Pp.debug
+               4
+               (lazy
+                 (item
+                    ("  " ^ phase_label ^ " rejected (overlaps user-owned)")
+                    (Qualifier.pp q)));
+             None
            | Some fp when not (Int64Set.is_empty (Int64Set.inter fp must_cover)) ->
              let covers = Int64Set.cardinal (Int64Set.inter fp must_cover) in
              Pp.debug
@@ -226,7 +237,13 @@ let infer
   Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string summary_file)));
   let execution_data = Data_point.parse_summary_json summary_file in
   Pp.debug 2 (lazy (Pp.item "bi-abd: parsing" (Pp.string heap_file)));
-  let pre_dumps, post_dumps = Data_point.parse_heap_jsonl heap_file in
+  (* Heap snapshots are keyed per activation (dp) and per phase: the pre
+     snapshot approximates H_entry for the body_missing (precondition)
+     phase, the post snapshot is H_exit for the post_remaining
+     (postcondition) phase.  Distinct activations may reuse the same stack
+     addresses with different contents, so snapshots are never merged
+     across dps. *)
+  let pre_heaps, post_heaps = Data_point.parse_heap_jsonl heap_file in
   Pp.debug
     3
     (lazy
@@ -234,17 +251,9 @@ let infer
          "heap dumps"
          (Pp.string
             (Printf.sprintf
-               "pre:%d post:%d"
-               (StdList.length pre_dumps)
-               (StdList.length post_dumps)))));
-  (* Run the harness once per phase against its matching heap snapshot:
-     [pre_heap_words] for the body_missing (precondition) phase,
-     [post_heap_words] for the post_remaining (postcondition) phase.
-     For functions that mutate the heap (e.g. constructors, setters)
-     these snapshots differ, so reusing one for both phases would either
-     reject or mis-shape the postcondition predicates. *)
-  let pre_heap_words = Data_point.flatten_heap_dumps pre_dumps in
-  let post_heap_words = Data_point.flatten_heap_dumps post_dumps in
+               "pre: %d dps, post: %d dps"
+               (Data_point.IntMap.cardinal pre_heaps)
+               (Data_point.IntMap.cardinal post_heaps)))));
   Pp.debug
     2
     (lazy
@@ -271,9 +280,7 @@ let infer
     (fun (func_name, dps) ->
        match StdList.assoc_opt func_name function_args with
        | None ->
-         Printf.eprintf
-           "bi-abd: skipping %s (no signature info available)\n"
-           func_name;
+         Printf.eprintf "bi-abd: skipping %s (no signature info available)\n" func_name;
          None
        | Some signature_args ->
          Some
@@ -282,8 +289,8 @@ let infer
               ~harness
               ~pred_defs
               ~signature_args
-              ~pre_heap_words
-              ~post_heap_words
+              ~pre_heaps
+              ~post_heaps
               ~func_name
               ~dps))
     grouped
@@ -300,7 +307,7 @@ let pp_suggestions (specs : inferred_spec list) : Pp.document =
       ^^ hardline
       ^^ separate
            hardline
-           (StdList.map (fun q -> string "  take _ = " ^^ Qualifier.pp q ^^ semi) qs)
+           (StdList.map (fun q -> string "  " ^^ nest 2 (Qualifier.pp_takes q)) qs)
   in
   StdList.map
     (fun spec ->

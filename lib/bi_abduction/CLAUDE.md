@@ -18,8 +18,8 @@ Entry points:
 
 | Module | Role |
 |---|---|
-| `data_point.ml` | Parse `cn_abd_summary.json` (lightweight: missing addrs + var bindings) and `cn_abd_heap.jsonl` (raw memory words). Types: `var_binding`, `missing_entry`, `data_point`, `heap_dump`. |
-| `qualifier.ml` | Thin wrapper around `Request.t`. A qualifier = a candidate `take _ = ...` binding. Uses CN's existing `Request.t`, `IndexTerms.t`, `Sctypes.t` — no parallel type hierarchy. |
+| `data_point.ml` | Parse `cn_abd_summary.json` and `cn_abd_heap.jsonl`, both keyed per activation (`dp`). Types: `var_binding`, `missing_entry`, `data_point` (with `dp_idx`, `post_vars`, `owned_pre`), `heap_dumps_by_dp`. |
+| `qualifier.ml` | A qualifier is a *chain* of named `take` bindings (`step list`); singleton chains are today's flat qualifiers, multi-step chains are IDEA.md 4.4. Uses CN's existing `Request.t`, `IndexTerms.t`, `Sctypes.t` — no parallel type hierarchy. |
 | `enumerator.ml` | Generate candidate qualifiers naively from the current function scope: `Owned<T>(arg)` for pointer args, plus every well-typed predicate application rooted at a pointer arg with iargs drawn from in-scope args and small constants. No heap-shape filtering — wrong candidates are rejected by the harness. |
 | `fp_codegen.ml` | Emit a self-contained C harness (`bi_abd_fp_<func>.c`) that runs each predicate qualifier in PRE mode against a recorded heap. Reuses Fulminate.Internal helpers for predicate / struct / record / conversion / ownership C codegen. |
 | `fp_runner.ml` | Drive the harness end to end: write the .c, invoke `cc` to compile + link against `libcn_exec.a`, run, parse the JSON output. |
@@ -47,27 +47,49 @@ Entry points:
 - `<>` is shadowed by CN's integer comparison. Use `String.length s > 0` instead of `s <> ""` for string checks.
 - `Request.t` does not support polymorphic `=`. Pattern match instead of `x = []`.
 
+## Runtime semantics (paper: sec-biabduction.tex)
+
+The runtime keeps a global **event log** of abduction triples `(a, size, o, d)`
+— address range acquired at accessor depth `d` while owned at depth `o`
+(`o = 0` = environment; the lazy representation of Definition acq).  Each
+activation's anti-frame is materialised at pop-frame time as
+`A_i = { a | event in i's span, o < depth_i <= d }` — the paper's interval
+rule; there is **no wholesale merge into the caller** (that design is proven
+non-canonical, see `tests/bi-abd/step0_interval_owner.c`).  Precondition takes
+acquire at the *caller's* depth (`cn_get_ownership` checks at
+`cn_stack_depth - 1`), so a callee's own precondition footprint never lands in
+its own record.  At return, `cn_abd_leak_check_and_release` records the leak
+set Λ and *releases it to the caller* (B-Ret), so later activations are not
+contaminated (see `baseline_multi_call_list.c`).
+
 ## Runtime data format
 
-**`cn_abd_summary.json`** — written once at exit:
+**`cn_abd_summary.json`** — written once at exit, one entry per activation:
 ```json
 {"data_points":[{
+  "dp":0,
   "function":"f",
-  "pre":{"vars":[{"name":"p","value":"0x...","size":8}]},
-  "body":{"missing":[{"addr":"0x...","size":1}]},
-  "post":{"remaining":[{"addr":"0x...","size":1}]}
+  "pre":{"vars":[{"name":"p","value":"0x...","size":8}],
+         "owned":[{"addr":"0x...","size":16}]},
+  "body":{"missing":[{"addr":"0x...","size":8}]},
+  "post":{"vars":[{"name":"return","value":"0x...","size":8}],
+          "remaining":[{"addr":"0x...","size":1}]}
 }]}
 ```
-Note: the callee's pre_missing (addresses its declared precondition could not
-claim) is not recorded in its own data point. Per IDEA.md's CALL/return rules,
-pre_missing is propagated to the caller's missing set at pop_frame time, so
-the caller's body_missing already reflects it transitively.
+`pre.owned` is the ownership held right after the user precondition evaluated
+(user footprint + parameter/local cells): the complement of the sandwich upper
+bound `B_j`; `infer.ml` rejects candidates whose footprint intersects it.
+`post.vars` currently records `return` for scalar/pointer-returning functions.
 
 **`cn_abd_heap.jsonl`** — one JSON object per line, written incrementally:
 ```json
-{"phase":"pre","words":{"0x...":"0x...",...}}
+{"dp":0,"phase":"pre","words":{"0x...":"0x...",...}}
 ```
-`phase` is `"pre"` (H_entry snapshot) or `"post"` (H_exit snapshot). Words are 8-byte-aligned address → 8-byte hex value. Used by `heap_lookup` for pointer chasing.
+`dp` ties the snapshot to its activation (stack addresses are reused across
+calls, so snapshots must never be merged across dps); `phase` is `"pre"`
+(entry-heap approximation: dumped around pointer args at mark_post and around
+each first-missing address) or `"post"` (H_exit, dumped at the leak check).
+Words are 8-byte-aligned address → 8-byte hex value.
 
 ## Debug output (`-p N`)
 
@@ -81,10 +103,10 @@ The inference modules use `Pp.debug` at these levels:
 
 See **[TODO.md](TODO.md)** for detailed analysis. The most critical:
 
-- **Only postconditions are inferred** — `body_missing` captures all body ownership failures, which conflates precondition and postcondition needs
-- **Multiple executions are not generalised yet** — the baseline uses one representative run and ignores the others
-- **No partial spec awareness** — suggested qualifiers may overlap with existing takes
-- **No iterated resources, free/malloc, loop invariants, qualifier chains, return value**
+- **Multiple executions are not generalised yet** — the baseline uses one representative run and ignores the others (the wire format, harness tables and `Fp_table` are already per-dp; only `infer.ml`/`cover.ml` collapse to one)
+- **Chains are type-only** — `Qualifier.t` is chain-shaped but the enumerator only emits singletons; the harness renders only singletons
+- **No iterated resources (`each`), free/malloc, loop invariants**
+- **`return` is recorded but not yet used as a candidate anchor**
 
 ## Testing
 

@@ -34,9 +34,11 @@ val compute_predicate_table
   qualifiers:(int * Qualifier.t) list ->
   Fp_table.t
 
+(** Footprint of qualifier [q] (with candidate index [q_idx]) on data point
+    [dp]: analytically for singleton Owned chains, from the harness table
+    (keyed by [(q_idx, dp.dp_idx)]) for predicates. *)
 val lookup
-  :  representative_dp:Data_point.data_point ->
-  representative_dp_idx:int ->
+  :  dp:Data_point.data_point ->
   fp_table:Fp_table.t ->
   int * Qualifier.t ->
   Int64Set.t option

@@ -50,6 +50,17 @@ expectations_for() {
     baseline_multi_call_list.c)
       printf '%s\n' \
         '/* Function: list_length */' \
+        'take _ = IntList(p);'
+      ;;
+    step0_interval_owner.c)
+      printf '%s\n' \
+        '/* Function: read_cell */' \
+        'take _ = RW<signed int>(p);' \
+        '/* Function: caller */'
+      ;;
+    step0_partial_spec_b.c)
+      printf '%s\n' \
+        '/* Function: list_length */' \
         '/* inference failed */'
       ;;
     baseline_pair_pre_post.c)
@@ -99,6 +110,25 @@ expectations_for() {
   esac
 }
 
+# Multi-line fixed strings that must NOT appear in the output (matched as a
+# plain substring, so patterns may span lines).  Empty for most tests.
+forbidden_for() {
+  case "$1" in
+    step0_interval_owner.c)
+      # caller already owns *p via its own precondition; the interval rule
+      # must not abduce it into caller's anti-frame (no suggestions at all).
+      printf '/* Function: caller */\n  /* Suggested'
+      ;;
+    step0_partial_spec_b.c)
+      # IntList(p) overlaps the node the user's spec already owns
+      # (sandwich upper bound B); it must not be suggested.
+      printf 'take _ = IntList(p);'
+      ;;
+    *)
+      ;;
+  esac
+}
+
 run_case() {
   local test_name="$1"
   local test_path="$TEST_DIR/$test_name"
@@ -133,6 +163,16 @@ run_case() {
     fi
   done < <(expectations_for "$test_name")
 
+  local forbidden
+  forbidden=$(forbidden_for "$test_name")
+  if [ -n "$forbidden" ] && [[ "$output" == *"$forbidden"* ]]; then
+    if [ "$missing" -eq 0 ]; then
+      printf '[FAIL] %s\n' "$test_name"
+    fi
+    missing=1
+    printf '  forbidden output present: %s\n' "$forbidden"
+  fi
+
   if [ "$missing" -ne 0 ]; then
     printf '%s\n' "$output"
     return 1
@@ -160,6 +200,8 @@ main() {
       extra_predicate_body_ignored.c
       extra_scalar_pointer_missing.c
       extra_wrong_struct_type.c
+      step0_interval_owner.c
+      step0_partial_spec_b.c
     )
   fi
 

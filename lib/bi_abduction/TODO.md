@@ -1,25 +1,9 @@
 # Bi-Abduction: Limitations, TODOs, and Future Plans
 
-## Critical: Pre-condition inference is broken
-
-**Severity: the system only infers postconditions.**
-
-The codegen order is: `abd_push → record_args → precondition_eval → entry → abd_mark_post → [body] → exit → postcondition_eval → abd_pop`.
-
-With `requires true`, the precondition eval does nothing, so `pre_missing = {}`. After `mark_post`, all body ownership failures go into `post_missing`. The postcondition leak check also adds to `post_missing`. So `post_missing` conflates two distinct things:
-
-1. Addresses the body **needed at entry** (should be precondition)
-2. Addresses **still owned at exit** (should be postcondition)
-
-For functions that borrow and return everything (e.g., `list_length`), pre = post so conflation is harmless. But for functions that consume or produce ownership (e.g., `free`, constructors), this distinction matters.
-
-**Possible fixes:**
-- (a) **Heuristic**: For `requires true`, assume pre = post (body needs = leaked). Works for read-only traversals but not for mutation.
-- (b) **Two-pass**: First run to discover body's needs (→ pre), second run with those addresses pre-granted to discover what leaks (→ post).
-- (c) **Semantic split**: Track *why* each address is missing — was it a body access (pre need) or a leak check (post residue)? This requires tagging in `c_ownership_check` vs `cn_postcondition_leak_check`.
-
-Approach (c) is cleanest. In `bi_abduction.c`, add a `source` tag to each missing entry: `BODY_ACCESS` vs `LEAK_CHECK`. Then in the OCaml side, split `post_missing` into `pre_candidates` (body accesses) and `post_candidates` (leaks).
-
+*(Step 0 of PLAN.md — interval-propagation event log, Λ release at return,
+dp-keyed wire schema with `owned`/`post.vars`, the `B` overlap filter, and the
+chain-shaped `Qualifier.t` — is done; sections below have been pruned
+accordingly.)*
 
 ## Critical: Multiple executions are not generalised
 
@@ -43,11 +27,17 @@ structured shape abstraction.
 
 ## Partial specifications
 
-The missing set *implicitly* respects existing specs: if the user has `take X = Owned<struct foo>(p)`, Fulminate grants ownership for those bytes, so they don't appear as missing. This is correct for exclusion.
+Mostly handled by Step 0: the runtime snapshots `owned_pre` (ghost entries at
+the activation's depth right after the user precondition evaluated) and
+`infer.ml` rejects candidates whose footprint intersects it — the sandwich
+upper bound `B_j` (see `tests/bi-abd/step0_partial_spec_b.c`).
 
-However, the *suggested* qualifiers may **overlap** with existing takes. For example, if the user has `take X = Owned<struct node>(p)` and the function traverses a list from `p`, the inference might suggest `IntList(p)` which *also* owns `struct node` at `p`.
-
-**Fix**: After cover selection, subtract the footprint of existing spec takes from each suggested qualifier's footprint. If a qualifier's remaining footprint is empty, drop it. If it partially overlaps, warn or suggest only the non-overlapping part. Requires parsing the existing spec's resource bindings and computing their footprints — this could reuse Fulminate's existing ownership tracking.
+Remaining gaps:
+- at **post**, the filter reuses the *pre* snapshot as an approximation of the
+  user's postcondition footprint; for consuming/transferring functions the
+  right subtrahend is the post footprint, which is not yet recorded;
+- rejected overlapping candidates currently just disappear — suggesting the
+  non-overlapping *remainder* needs qualifier chains (PLAN.md Step 3).
 
 
 ## Iterated separating conjunctions (`each`)

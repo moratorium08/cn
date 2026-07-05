@@ -47,18 +47,14 @@ let bt_to_c_value_info : BT.t -> string * string = function
   | BT.Bits (sign, sz) ->
     let signed = match sign with BT.Signed -> true | BT.Unsigned -> false in
     let prefix = if signed then "i" else "u" in
-    let c_int =
-      Printf.sprintf "%sint%d_t" (if signed then "" else "u") sz
-    in
+    let c_int = Printf.sprintf "%sint%d_t" (if signed then "" else "u") sz in
     let cast = Printf.sprintf "(%s)" c_int in
     (cast, Printf.sprintf "convert_to_cn_bits_%s%d" prefix sz)
   | BT.Bool -> ("(_Bool)", "convert_to_cn_bool")
   | BT.Integer -> ("(int64_t)", "convert_to_cn_integer")
   | bt ->
     failwith
-      (Printf.sprintf
-         "fp_codegen: unsupported iarg base type: %s"
-         (Pp.plain (BT.pp bt)))
+      (Printf.sprintf "fp_codegen: unsupported iarg base type: %s" (Pp.plain (BT.pp bt)))
 
 
 (* ---------- Render an IT.t as a C raw-value expression ---------- *)
@@ -101,19 +97,19 @@ let wrap_convert ~(bt : BT.t) (raw_expr : string) : string =
 (* ---------- Free-symbol set of a qualifier ---------- *)
 
 let free_syms_of_term (term : IT.t) : string list =
-  match term with
-  | Terms.IT (Sym sym, _, _) -> [ Sym.pp_string sym ]
-  | _ -> []
+  match term with Terms.IT (Sym sym, _, _) -> [ Sym.pp_string sym ] | _ -> []
 
 
 let free_syms_of_qualifier (q : Qualifier.t) : string list =
-  match q with
-  | Request.P { pointer; iargs; _ } ->
-    let names =
+  let of_step (step : Qualifier.step) =
+    match step.req with
+    | Request.P { pointer; iargs; _ } ->
       free_syms_of_term pointer @ StdList.concat_map free_syms_of_term iargs
-    in
-    StdList.sort_uniq Stdlib.String.compare names
-  | _ -> []
+    | _ -> []
+  in
+  (* Chain-bound names are not free; for the singleton chains produced today
+     there are no bound-name occurrences to subtract. *)
+  StdList.sort_uniq Stdlib.String.compare (StdList.concat_map of_step q)
 
 
 let dp_has_all_syms (dp : Data_point.data_point) (names : string list) : bool =
@@ -135,8 +131,10 @@ let render_qualifier_call
       (q : Qualifier.t)
   : (string * string list) option
   =
-  match q with
-  | Request.P { name = PName pred_sym; pointer; iargs } ->
+  (* Multi-step chains will be rendered as sequential take calls sharing one
+     ghost frame (Step 3 of PLAN.md); until then only singletons appear. *)
+  match Qualifier.singleton_req q with
+  | Some (Request.P { name = PName pred_sym; pointer; iargs }) ->
     (match Sym.Map.find_opt pred_sym pred_defs with
      | None -> None
      | Some (pred_def : Definition.Predicate.t) ->
@@ -162,9 +160,7 @@ let emit_dp_idxs_array ~(name : string) (idxs : int list) : string =
   Buffer.add_string b (Printf.sprintf "static const int %s[] = {" name);
   StdList.iter (fun i -> Buffer.add_string b (Printf.sprintf " %d," i)) idxs;
   buf_add b " };";
-  buf_add
-    b
-    (Printf.sprintf "static const size_t %s_N = %d;" name (StdList.length idxs));
+  buf_add b (Printf.sprintf "static const size_t %s_N = %d;" name (StdList.length idxs));
   Buffer.contents b
 
 
@@ -175,11 +171,13 @@ let emit_qualifier_fn
   : string
   =
   let needed_syms = free_syms_of_qualifier q in
+  (* Positions into ALL_DPS (which is in [data_points] order); the real
+     activation id lives in the entry's dp_idx field and is what the JSON
+     output is keyed by. *)
   let valid_dp_idxs =
-    StdList.filter_map
-      (fun (e : dp_entry) ->
-         if dp_has_all_syms e.dp needed_syms then Some e.dp_idx else None)
-      data_points
+    StdList.mapi (fun pos (e : dp_entry) -> (pos, e)) data_points
+    |> StdList.filter_map (fun (pos, (e : dp_entry)) ->
+      if dp_has_all_syms e.dp needed_syms then Some pos else None)
   in
   let idxs_name = Printf.sprintf "Q%d_DP_IDXS" q_idx in
   let idxs_decl = emit_dp_idxs_array ~name:idxs_name valid_dp_idxs in
@@ -190,7 +188,8 @@ let emit_qualifier_fn
       Printf.sprintf
         "    fp_setup(dp);\n\
         \    if (sigsetjmp(fp_jmp, 1) == 0) {\n\
-        \      (void)%s(\n          %s);\n\
+        \      (void)%s(\n\
+        \          %s);\n\
         \      fp_emit_footprint(out, %d, dp->dp_idx, FP_PREDICATE_DEPTH);\n\
         \    } else {\n\
         \      fp_emit_null(out, %d, dp->dp_idx);\n\
@@ -200,16 +199,14 @@ let emit_qualifier_fn
         arg_str
         q_idx
         q_idx
-    | None ->
-      Printf.sprintf "    fp_emit_null(out, %d, dp->dp_idx);\n" q_idx
+    | None -> Printf.sprintf "    fp_emit_null(out, %d, dp->dp_idx);\n" q_idx
   in
   Printf.sprintf
     "%s\n\
      static void run_q%d(FILE *out) {\n\
     \  for (size_t i = 0; i < %s_N; i++) {\n\
     \    const fp_dp_t *dp = &ALL_DPS[%s[i]];\n\
-     %s\
-    \  }\n\
+     %s  }\n\
      }\n"
     idxs_decl
     q_idx
@@ -242,9 +239,7 @@ let emit_dp_tables (data_points : dp_entry list) : string =
          (Printf.sprintf "static const fp_heap_word_t HEAP_DP%d[] = {" e.dp_idx);
        StdList.iter
          (fun (a, v) ->
-            Buffer.add_string
-              b
-              (Printf.sprintf "\n  { 0x%LxUL, 0x%LxUL }," a v))
+            Buffer.add_string b (Printf.sprintf "\n  { 0x%LxUL, 0x%LxUL }," a v))
          e.heap_words;
        buf_add b "\n};";
        buf_add
@@ -286,9 +281,7 @@ let emit_dp_tables (data_points : dp_entry list) : string =
             e.dp_idx))
     data_points;
   buf_add b "\n};";
-  buf_add
-    b
-    "static const size_t ALL_DPS_N = sizeof ALL_DPS / sizeof ALL_DPS[0];";
+  buf_add b "static const size_t ALL_DPS_N = sizeof ALL_DPS / sizeof ALL_DPS[0];";
   Buffer.contents b
 
 
@@ -394,15 +387,12 @@ static void fp_emit_null(FILE *out, int q_idx, int dp_idx) {
 
 (* ---------- main() ---------- *)
 
-let emit_main (qualifiers : (int * Qualifier.t) list) (output_json_path : string)
-  : string
+let emit_main (qualifiers : (int * Qualifier.t) list) (output_json_path : string) : string
   =
   let b = Buffer.create 256 in
   buf_add b "int main(void) {";
   buf_add b "  fulminate_init();";
-  buf_add
-    b
-    (Printf.sprintf "  FILE* out = fopen(\"%s\", \"w\");" output_json_path);
+  buf_add b (Printf.sprintf "  FILE* out = fopen(\"%s\", \"w\");" output_json_path);
   buf_add b "  if (!out) { perror(\"fp harness fopen\"); return 2; }";
   buf_add b "  fputs(\"{\\\"results\\\":[\", out);";
   buf_add b "  fp_first = 1;";
@@ -423,12 +413,7 @@ let emit (input : input) : string =
   Records.populate_record_map [] input.prog5;
   let sigm = input.ail_prog in
   let c_predicate_defs, c_predicate_decls, _ =
-    Internal.generate_c_predicates
-      input.filename
-      false
-      input.cabs_tunit
-      input.prog5
-      sigm
+    Internal.generate_c_predicates input.filename false input.cabs_tunit input.prog5 sigm
   in
   let c_function_defs, c_function_decls, _ =
     Internal.generate_c_functions input.filename input.cabs_tunit input.prog5 sigm
@@ -441,7 +426,9 @@ let emit (input : input) : string =
   in
   let ordered_ail_tag_defs = Internal.order_ail_tag_definitions sigm.tag_definitions in
   let c_tag_defs = Internal.generate_c_tag_def_strs ordered_ail_tag_defs in
-  let cn_converted_struct_defs = Internal.generate_cn_versions_of_structs ordered_ail_tag_defs in
+  let cn_converted_struct_defs =
+    Internal.generate_cn_versions_of_structs ordered_ail_tag_defs
+  in
   let record_fun_defs, record_fun_decls = Records.generate_c_record_funs sigm in
   let record_defs = Records.generate_all_record_strs () in
   let c_datatype_defs = Internal.generate_c_datatypes sigm in

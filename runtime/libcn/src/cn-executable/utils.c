@@ -305,24 +305,13 @@ void ghost_stack_depth_decr(void) {
   // cn_printf(CN_LOGGING_INFO, "\n");
 }
 
-/* Callback for rmap_foreach used in bi-abductive leak check */
-static void abd_leak_collect_cb(
-    rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx) {
-  signed long depth = *(signed long *)ctx;
-  if (v > depth) {
-    for (rmap_key_t addr = k0; addr <= k1; addr++) {
-      cn_abd_record_post_remaining(addr, 1);
-    }
-  }
-}
-
 void cn_postcondition_leak_check(void) {
   rmap_range_res_t res = rmap_find_range(0UL, -1UL, cn_ownership_global_ghost_state);
   if (res.defined && res.max > cn_stack_depth) {
     if (cn_abd_is_enabled()) {
-      /* Collect leaked addresses instead of failing */
-      rmap_foreach(cn_ownership_global_ghost_state, abd_leak_collect_cb,
-          &cn_stack_depth);
+      /* Record the leak set Lambda and release it to the caller
+         (paper rule B-Ret) instead of failing. */
+      cn_abd_leak_check_and_release(cn_stack_depth);
       return;
     }
     print_error_msg_info(global_error_msg_info);
@@ -557,10 +546,13 @@ void report_and_correct_missing_ownership(
     assert(size > 0);
 
     if (cn_abd_is_enabled()) {
-      /* Bi-abductive mode: silently record missing ownership for inference */
-      for (size_t a = (size_t)addr; a < (size_t)addr + size; a++) {
-        cn_abd_record_missing((uintptr_t)a, 1);
-      }
+      /* Bi-abductive mode: log the abduction event (a, size, o, d) for
+         inference and continue.  [depth] is the previous owner o (may be
+         UNMAPPED_VAL); [expected_stack_depth] is the acquisition depth d:
+         the caller's depth for precondition takes (cn_get_ownership checks
+         at cn_stack_depth - 1), the current depth otherwise.  Per-activation
+         anti-frames are materialised from these events at pop-frame time. */
+      cn_abd_record_event((uintptr_t)addr, size, depth, expected_stack_depth);
     } else {
       // report missing ownership
       if (global_error_msg_info)

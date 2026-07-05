@@ -299,6 +299,22 @@ let generate_c_specs_internal
     else
       []
   in
+  (* Record the return value as a post-state variable (the paper's
+     V-flat contains [ret]).  Only for scalar/pointer returns: [__cn_ret]
+     is in scope in the epilogue and the (uintptr_t) cast is meaningful. *)
+  let abd_record_ret =
+    if bi_abductive then (
+      match List.assoc_opt CF.Symbol.equal_sym instrumentation.fn sigm.A.declarations with
+      | Some (_, _, A.Decl_function (_, (_, C.Ctype (_, ret_ty_)), _, _, _, _)) ->
+        (match ret_ty_ with
+         | C.Basic (C.Integer _) | C.Pointer _ ->
+           [ "\tcn_abd_record_post_var(\"return\", (uintptr_t)__cn_ret, sizeof(__cn_ret));\n"
+           ]
+         | _ -> [])
+      | _ -> [])
+    else
+      []
+  in
   let abd_pop =
     if bi_abductive then
       [ "\tcn_abd_pop_frame();\n" ]
@@ -308,7 +324,7 @@ let generate_c_specs_internal
   let pre_strs =
     abd_push @ abd_record_args @ cn_spec_inj_info.pre_str @ entry_strs @ abd_mark_post
   in
-  let post_strs = exit_strs @ cn_spec_inj_info.post_str @ abd_pop in
+  let post_strs = exit_strs @ cn_spec_inj_info.post_str @ abd_record_ret @ abd_pop in
   ( [ (instrumentation.fn, (pre_strs, post_strs)) ],
     cn_spec_inj_info.in_stmt_and_loop_inv_injs
     @ stack_local_var_inj_info.block_ownership_stmts,

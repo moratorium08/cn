@@ -1,10 +1,18 @@
 (** Parsing and representation of bi-abductive execution data.
-    Reads the JSON summary file (.abd.json) and JSONL heap dump (.heap.jsonl)
-    produced by the bi-abductive runtime. *)
+    Reads the JSON summary file (cn_abd_summary.json) and JSONL heap dump
+    (cn_abd_heap.jsonl) produced by the bi-abductive runtime.
+
+    Wire schema (one entry per activation, keyed by [dp]):
+    - summary: {"data_points":[{"dp":N,"function":f,
+        "pre":{"vars":[...],"owned":[{addr,size}...]},
+        "body":{"missing":[...]},
+        "post":{"vars":[...],"remaining":[...]}}]}
+    - heap JSONL: {"dp":N,"phase":"pre"|"post","words":{addr:val,...}} *)
 
 (* Restore standard library modules shadowed by CN's library *)
 module StdList = Stdlib.List
 module String = Stdlib.String
+module IntMap = Map.Make (Int)
 
 type var_binding =
   { name : string;
@@ -17,12 +25,17 @@ type missing_entry =
     size : int
   }
 
-(* TODO(HK): Add a field for capturing `return` values *)
 type data_point =
-  { function_name : string;
+  { dp_idx : int; (** activation id, in call order *)
+    function_name : string;
     pre_vars : var_binding list;
-    body_missing : missing_entry list; (* body auto-grants = precondition needs *)
-    post_remaining : missing_entry list (* leak check remainder = postcondition *)
+    post_vars : var_binding list; (** post-state bindings, e.g. [return] *)
+    owned_pre : missing_entry list;
+      (** ownership held after evaluating the user precondition (user
+            footprint + parameter/local cells); the complement of the
+            sandwich upper bound B *)
+    body_missing : missing_entry list; (** materialised anti-frame A *)
+    post_remaining : missing_entry list (** leak set Lambda = frame L *)
   }
 
 type execution_data = { data_points : data_point list }
@@ -88,23 +101,20 @@ let parse_missing_entry j =
   }
 
 
+let parse_entry_list j = json_list j |> StdList.map parse_missing_entry
+
 (* --- Data point parsing --- *)
 
 let parse_data_point j =
   let pre_obj = json_field "pre" j in
-  let pre_vars = json_list (json_field "vars" pre_obj) |> StdList.map parse_var_binding in
-  let body_missing =
-    json_list (json_field "missing" (json_field "body" j))
-    |> StdList.map parse_missing_entry
-  in
-  let post_remaining =
-    json_list (json_field "remaining" (json_field "post" j))
-    |> StdList.map parse_missing_entry
-  in
-  { function_name = json_string (json_field "function" j);
-    pre_vars;
-    body_missing;
-    post_remaining
+  let post_obj = json_field "post" j in
+  { dp_idx = json_int (json_field "dp" j);
+    function_name = json_string (json_field "function" j);
+    pre_vars = json_list (json_field "vars" pre_obj) |> StdList.map parse_var_binding;
+    post_vars = json_list (json_field "vars" post_obj) |> StdList.map parse_var_binding;
+    owned_pre = parse_entry_list (json_field "owned" pre_obj);
+    body_missing = parse_entry_list (json_field "missing" (json_field "body" j));
+    post_remaining = parse_entry_list (json_field "remaining" post_obj)
   }
 
 
@@ -125,19 +135,29 @@ let parse_heap_words_obj j =
     { addr = parse_hex_int64 addr_s; value = parse_hex_int64 (json_string val_j) })
 
 
-let parse_heap_dump_line (line : string) : [ `Pre | `Post ] * heap_dump =
+let parse_heap_dump_line (line : string) : int * [ `Pre | `Post ] * heap_dump =
   let j = Yojson.Safe.from_string line in
+  let dp_idx = json_int (json_field "dp" j) in
   let phase =
     match StdList.assoc_opt "phase" (json_assoc j) with
     | Some (`String "post") -> `Post
-    | _ -> `Pre (* "pre", missing, or legacy "body" → Pre *)
+    | _ -> `Pre
   in
   let dump = { words = parse_heap_words_obj (json_field "words" j) } in
-  (phase, dump)
+  (dp_idx, phase, dump)
 
 
-(** Parse a heap JSONL file and return (pre_dumps, post_dumps) split by phase. *)
-let parse_heap_jsonl (filename : string) : heap_dump list * heap_dump list =
+(** Per-activation heap snapshots: dp index -> dumps for that activation. *)
+type heap_dumps_by_dp = heap_dump list IntMap.t
+
+(** Parse a heap JSONL file; returns (pre, post) snapshots keyed by dp. *)
+let parse_heap_jsonl (filename : string) : heap_dumps_by_dp * heap_dumps_by_dp =
+  let add dp_idx dump m =
+    IntMap.update
+      dp_idx
+      (function Some ds -> Some (dump :: ds) | None -> Some [ dump ])
+      m
+  in
   let ic = open_in filename in
   let rec read_lines pre post =
     match input_line ic with
@@ -146,13 +166,15 @@ let parse_heap_jsonl (filename : string) : heap_dump list * heap_dump list =
       if String.length line = 0 then
         read_lines pre post
       else (
-        let phase, dump = parse_heap_dump_line line in
+        let dp_idx, phase, dump = parse_heap_dump_line line in
         match phase with
-        | `Pre -> read_lines (dump :: pre) post
-        | `Post -> read_lines pre (dump :: post))
-    | exception End_of_file -> (StdList.rev pre, StdList.rev post)
+        | `Pre -> read_lines (add dp_idx dump pre) post
+        | `Post -> read_lines pre (add dp_idx dump post))
+    | exception End_of_file -> (pre, post)
   in
-  Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_lines [] [])
+  Fun.protect
+    ~finally:(fun () -> close_in ic)
+    (fun () -> read_lines IntMap.empty IntMap.empty)
 
 
 (* --- Grouping --- *)
@@ -191,18 +213,16 @@ let missing_addr_set (entries : missing_entry list) : Int64Set.t =
     entries
 
 
-(* Build a lookup function from heap dumps: addr -> value option *)
-let heap_lookup (dumps : heap_dump list) : int64 -> int64 option =
-  let tbl = Hashtbl.create 256 in
-  StdList.iter
-    (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
-    dumps;
-  fun addr -> Hashtbl.find_opt tbl addr
-
-
-let flatten_heap_dumps (dumps : heap_dump list) : (int64 * int64) list =
-  let tbl = Hashtbl.create 256 in
-  StdList.iter
-    (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
-    dumps;
-  Hashtbl.fold (fun a v acc -> (a, v) :: acc) tbl []
+(** Flatten one activation's heap dumps into a deduplicated [(addr, value)]
+    list, for feeding to the footprint harness. *)
+let heap_words_for_dp (dumps_by_dp : heap_dumps_by_dp) (dp_idx : int)
+  : (int64 * int64) list
+  =
+  match IntMap.find_opt dp_idx dumps_by_dp with
+  | None -> []
+  | Some dumps ->
+    let tbl = Hashtbl.create 256 in
+    StdList.iter
+      (fun dump -> StdList.iter (fun w -> Hashtbl.replace tbl w.addr w.value) dump.words)
+      dumps;
+    Hashtbl.fold (fun a v acc -> (a, v) :: acc) tbl []

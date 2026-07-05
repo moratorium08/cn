@@ -33,9 +33,7 @@ let owned_footprint ~(ct : Sctypes.t) ~(base_addr : int64) : Int64Set.t =
 
 
 (** Evaluate a simple pointer term to a concrete address using pre-state variables. *)
-let eval_pointer_term
-      (term : IndexTerms.t)
-      (pre_vars : Data_point.var_binding list)
+let eval_pointer_term (term : IndexTerms.t) (pre_vars : Data_point.var_binding list)
   : int64 option
   =
   match term with
@@ -48,17 +46,18 @@ let eval_pointer_term
   | _ -> None
 
 
-(** Compute the footprint of an [Owned] qualifier on a data point.  Predicate
-    qualifiers always return [None] from this entry point; their footprints
-    come from the C harness. *)
+(** Compute the footprint of a singleton [Owned] qualifier on a data point.
+    Predicate qualifiers (and non-singleton chains) always return [None]
+    from this entry point; their footprints come from the C harness. *)
 let compute (qualifier : Qualifier.t) (dp : Data_point.data_point) : Int64Set.t option =
-  match qualifier with
-  | Request.P { name = Owned (ct, _init); pointer; iargs = _ } ->
+  match Qualifier.singleton_req qualifier with
+  | Some (Request.P { name = Owned (ct, _init); pointer; iargs = _ }) ->
     (match eval_pointer_term pointer dp.pre_vars with
      | Some addr -> Some (owned_footprint ~ct ~base_addr:addr)
      | None -> None)
-  | Request.P { name = PName _; _ } -> None
-  | Request.Q _ -> None
+  | Some (Request.P { name = PName _; _ }) -> None
+  | Some (Request.Q _) -> None
+  | None -> None
 
 
 let compute_batch (qualifiers : Qualifier.t list) (dp : Data_point.data_point)
@@ -94,17 +93,17 @@ let compute_predicate_table
       ~qualifiers
 
 
+(** Footprint of qualifier [q] (with candidate index [q_idx]) on data point
+    [dp]: analytically for singleton Owned chains, from the harness table
+    (keyed by (q_idx, dp.dp_idx)) for predicates. *)
 let lookup
-      ~(representative_dp : Data_point.data_point)
-      ~(representative_dp_idx : int)
+      ~(dp : Data_point.data_point)
       ~(fp_table : Fp_table.t)
       ((q_idx, q) : int * Qualifier.t)
   : Int64Set.t option
   =
-  match q with
-  | Request.P { name = Owned _; _ } -> compute q representative_dp
-  | Request.P { name = PName _; _ } ->
-    (match Fp_table.find fp_table (q_idx, representative_dp_idx) with
-     | Some fp -> fp
-     | None -> None)
+  match Qualifier.singleton_req q with
+  | Some (Request.P { name = Owned _; _ }) -> compute q dp
+  | Some (Request.P { name = PName _; _ }) ->
+    (match Fp_table.find fp_table (q_idx, dp.dp_idx) with Some fp -> fp | None -> None)
   | _ -> None

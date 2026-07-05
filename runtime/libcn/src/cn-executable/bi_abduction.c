@@ -8,6 +8,18 @@
 #include <string.h>
 
 #include <cn-executable/bi_abduction.h>
+#include <cn-executable/rmap.h>
+#include <cn-executable/hash_table.h>
+#include <cn-executable/fulminate_alloc.h>
+
+/* Ownership map G, owned by utils.c. */
+struct cn_error_message_info;
+extern struct rmap *cn_ownership_global_ghost_state;
+extern signed long get_cn_stack_depth(void);
+void ownership_ghost_state_set(int64_t address,
+    size_t size,
+    int stack_depth_val,
+    struct cn_error_message_info *error_msg_info);
 
 /* Allocator: use stdlib malloc (not bump allocator) because bi-abductive state
    must persist beyond cn_bump_free_after which reclaims per-function bump memory. */
@@ -17,46 +29,81 @@ static void abd_free_noop(void *p) { (void)p; /* leaked intentionally; short-liv
 static allocator abd_alloc = (allocator){
     .malloc = &abd_malloc, .calloc = &abd_calloc, .free = &abd_free_noop};
 
+/* ---------- Event log (lazy representation of the interval write) ---------- */
+
+typedef struct abd_event {
+  uint64_t addr;
+  uint64_t size;
+  long o; /* owner depth at the access; 0 = environment */
+  long d; /* accessor depth (see header) */
+} abd_event;
+
+static abd_event *abd_events = NULL;
+static size_t abd_events_n = 0;
+static size_t abd_events_cap = 0;
+
+static void abd_events_push(uint64_t addr, uint64_t size, long o, long d) {
+  if (abd_events_n == abd_events_cap) {
+    size_t cap = abd_events_cap ? abd_events_cap * 2 : 256;
+    abd_event *grown = realloc(abd_events, cap * sizeof(abd_event));
+    if (!grown)
+      return; /* drop event on OOM; inference degrades, execution continues */
+    abd_events = grown;
+    abd_events_cap = cap;
+  }
+  abd_events[abd_events_n++] = (abd_event){.addr = addr, .size = size, .o = o, .d = d};
+}
+
+/* ---------- Frames (live activations) ---------- */
+
+typedef struct cn_abd_frame {
+  const char *function_name;
+  int dp_idx;              /* activation id, in call order */
+  signed long depth;       /* ghost stack depth of this activation */
+  size_t start_event;      /* event-log index at push */
+  hash_table *pre_vars;    /* idx -> cn_abd_var_entry* */
+  int pre_var_count;
+  hash_table *post_vars;   /* idx -> cn_abd_var_entry* */
+  int post_var_count;
+  hash_table *owned_pre;   /* addr -> size: G-entries at own depth at mark_post */
+  hash_table *post_remaining; /* leak set Lambda: addr -> size */
+  struct cn_abd_frame *prev;
+} cn_abd_frame;
+
+typedef struct cn_abd_var_entry {
+  const char *name;
+  uintptr_t value;
+  size_t size;
+} cn_abd_var_entry;
+
 /* Global state */
 static bool abd_enabled = false;
 static cn_abd_frame *current_frame = NULL;
 static FILE *heap_output = NULL;
+static int abd_next_dp_idx = 0;
 
-/* Linked list of collected data points (lightweight, kept in memory).
-   Note: pre_missing is NOT stored here. Per IDEA.md's CALL/return rules, the
-   callee's pre_missing (addresses the declared precondition could not claim)
-   is propagated to the caller via merge at pop_frame time, not recorded in
-   the callee's own data point. */
+/* Data points: one per completed activation. */
 typedef struct abd_data_point {
+  int dp_idx;
   const char *function_name;
   hash_table *pre_vars;
   int pre_var_count;
-  hash_table *body_missing;     /* body auto-grants = precondition needs */
-  hash_table *post_remaining;   /* leak check remainder = postcondition */
+  hash_table *post_vars;
+  int post_var_count;
+  hash_table *owned_pre;
+  hash_table *body_missing;   /* materialised anti-frame A */
+  hash_table *post_remaining; /* leak set Lambda = frame L */
   struct abd_data_point *next;
 } abd_data_point;
 
 static abd_data_point *data_points_head = NULL;
 static abd_data_point *data_points_tail = NULL;
 
+/* Dedup table for pre-phase heap dumps: key = (dp_idx << 48) | aligned addr. */
+static hash_table *abd_dumped_pre = NULL;
+
 static hash_table *abd_new_table(void) {
   return ht_create(&abd_alloc);
-}
-
-static void abd_reset_missing_state(cn_abd_frame *frame) {
-  frame->missing = abd_new_table();
-}
-
-static cn_abd_frame *abd_new_frame(const char *func_name, cn_abd_frame *parent) {
-  cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
-  frame->function_name = func_name;
-  abd_reset_missing_state(frame);
-  frame->pre_missing = NULL;
-  frame->pre_vars = abd_new_table();
-  frame->pre_var_count = 0;
-  frame->post_remaining = NULL;
-  frame->prev = parent;
-  return frame;
 }
 
 static void abd_record_addr_size(hash_table **table, uintptr_t addr, size_t size) {
@@ -73,39 +120,15 @@ static void abd_record_addr_size(hash_table **table, uintptr_t addr, size_t size
   ht_set(*table, heap_key, size_val);
 }
 
-static void abd_merge_missing(hash_table *dst, hash_table *src) {
-  if (src == NULL)
-    return;
-
-  hash_table_iterator it = ht_iterator(src);
-  while (ht_next(&it)) {
-    if (ht_get(dst, it.key) == NULL)
-      ht_set(dst, it.key, it.value);
-  }
-}
-
-static void abd_append_data_point(cn_abd_frame *frame) {
-  abd_data_point *dp = malloc(sizeof(abd_data_point));
-  dp->function_name = frame->function_name;
-  dp->pre_vars = frame->pre_vars;
-  dp->pre_var_count = frame->pre_var_count;
-  dp->body_missing = frame->missing;        /* body auto-grants = precondition */
-  dp->post_remaining = frame->post_remaining; /* leak check remainder = postcondition */
-  dp->next = NULL;
-
-  if (data_points_tail != NULL)
-    data_points_tail->next = dp;
-  else
-    data_points_head = dp;
-  data_points_tail = dp;
-}
-
 void cn_abd_init(FILE *heap_out) {
   abd_enabled = true;
   current_frame = NULL;
   heap_output = heap_out;
   data_points_head = NULL;
   data_points_tail = NULL;
+  abd_next_dp_idx = 0;
+  abd_events_n = 0;
+  abd_dumped_pre = NULL;
 }
 
 void cn_abd_destroy(void) {
@@ -124,7 +147,52 @@ void cn_abd_push_frame(const char *func_name) {
   if (!abd_enabled)
     return;
 
-  current_frame = abd_new_frame(func_name, current_frame);
+  cn_abd_frame *frame = malloc(sizeof(cn_abd_frame));
+  frame->function_name = func_name;
+  frame->dp_idx = abd_next_dp_idx++;
+  /* push runs before this activation's ghost_stack_depth_incr */
+  frame->depth = get_cn_stack_depth() + 1;
+  frame->start_event = abd_events_n;
+  frame->pre_vars = abd_new_table();
+  frame->pre_var_count = 0;
+  frame->post_vars = abd_new_table();
+  frame->post_var_count = 0;
+  frame->owned_pre = NULL;
+  frame->post_remaining = NULL;
+  frame->prev = current_frame;
+  current_frame = frame;
+}
+
+/* Materialise the anti-frame from the event log (paper, closed form /
+   Definition acq): A_i = { a | event (a,_,o,d) in i's span, o < depth_i <= d }. */
+static hash_table *abd_materialise_missing(cn_abd_frame *frame) {
+  hash_table *missing = abd_new_table();
+  for (size_t i = frame->start_event; i < abd_events_n; i++) {
+    abd_event *e = &abd_events[i];
+    if (e->o < frame->depth && frame->depth <= e->d)
+      abd_record_addr_size(&missing, (uintptr_t)e->addr, (size_t)e->size);
+  }
+  return missing;
+}
+
+static void abd_append_data_point(cn_abd_frame *frame, hash_table *missing) {
+  abd_data_point *dp = malloc(sizeof(abd_data_point));
+  dp->dp_idx = frame->dp_idx;
+  dp->function_name = frame->function_name;
+  dp->pre_vars = frame->pre_vars;
+  dp->pre_var_count = frame->pre_var_count;
+  dp->post_vars = frame->post_vars;
+  dp->post_var_count = frame->post_var_count;
+  dp->owned_pre = frame->owned_pre;
+  dp->body_missing = missing;
+  dp->post_remaining = frame->post_remaining;
+  dp->next = NULL;
+
+  if (data_points_tail != NULL)
+    data_points_tail->next = dp;
+  else
+    data_points_head = dp;
+  data_points_tail = dp;
 }
 
 void cn_abd_pop_frame(void) {
@@ -132,22 +200,11 @@ void cn_abd_pop_frame(void) {
     return;
 
   cn_abd_frame *frame = current_frame;
-
-  abd_append_data_point(frame);
-
-  /* Propagate callee's missing to parent (IDEA.md return rule: M'' = M ∪ M').
-     Both pre_missing (what the callee's own precondition wanted but was not
-     in the caller's state) and body_missing (what the body accessed beyond
-     the precondition) flow back to the caller's missing set — the caller
-     must have provided both. post_remaining (leak check) is the callee's
-     postcondition obligation, NOT the caller's, so it is not merged. */
-  cn_abd_frame *parent = frame->prev;
-  if (parent != NULL) {
-    abd_merge_missing(parent->missing, frame->pre_missing);
-    abd_merge_missing(parent->missing, frame->missing);
-  }
-
-  current_frame = parent;
+  abd_append_data_point(frame, abd_materialise_missing(frame));
+  /* No merge into the parent: ancestors materialise their own records from
+     the shared event log (interval semantics), which is what makes the
+     per-activation solutions least (paper, Theorem canonicity). */
+  current_frame = frame->prev;
 }
 
 /* Signal handler state for safe memory reads (file scope) */
@@ -160,10 +217,11 @@ static void safe_read_handler(int sig) {
     siglongjmp(jmp_env, 1);
 }
 
-/* Dump heap neighborhood around an address to heap_output (JSONL).
-   phase: "pre"  = H_entry snapshot (at cn_abd_mark_post, before body)
-          "post" = H_exit snapshot (at cn_abd_record_post_remaining, after body) */
-static void dump_heap_neighborhood(const char *phase, uintptr_t addr) {
+/* Dump heap neighborhood around an address to heap_output (JSONL), tagged
+   with the owning activation's dp index.
+   phase: "pre"  = entry-heap approximation (at mark_post / first miss)
+          "post" = exit heap (at the leak check) */
+static void dump_heap_neighborhood(const char *phase, int dp_idx, uintptr_t addr) {
   if (heap_output == NULL)
     return;
 
@@ -180,7 +238,7 @@ static void dump_heap_neighborhood(const char *phase, uintptr_t addr) {
   sigaction(SIGSEGV, &sa_new, &sa_old_segv);
   sigaction(SIGBUS, &sa_new, &sa_old_bus);
 
-  fprintf(heap_output, "{\"phase\":\"%s\",\"words\":{", phase);
+  fprintf(heap_output, "{\"dp\":%d,\"phase\":\"%s\",\"words\":{", dp_idx, phase);
 
   bool first = true;
   for (uintptr_t a = base; a <= end; a += 8) {
@@ -206,16 +264,34 @@ static void dump_heap_neighborhood(const char *phase, uintptr_t addr) {
   sigaction(SIGBUS, &sa_old_bus, NULL);
 }
 
-void cn_abd_record_missing(uintptr_t addr, size_t size) {
+/* Dump the pre-phase neighborhood of [addr] for the *current* activation,
+   once per (dp, 8-byte window).  Called on abduction events so that pointer
+   chains reachable from missing cells are visible to the footprint harness
+   even when they lie outside the argument neighborhoods. */
+static void abd_dump_pre_once(uintptr_t addr) {
+  if (heap_output == NULL || current_frame == NULL)
+    return;
+  if (abd_dumped_pre == NULL)
+    abd_dumped_pre = abd_new_table();
+  int64_t key =
+      ((int64_t)current_frame->dp_idx << 48) | (int64_t)(addr & ~(uintptr_t)7);
+  if (ht_get(abd_dumped_pre, &key) != NULL)
+    return;
+  int64_t *heap_key = malloc(sizeof(int64_t));
+  *heap_key = key;
+  static int64_t present = 1;
+  ht_set(abd_dumped_pre, heap_key, &present);
+  dump_heap_neighborhood("pre", current_frame->dp_idx, addr);
+}
+
+void cn_abd_record_event(
+    uintptr_t addr, size_t size, long owner_depth, long accessor_depth) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
-  if (current_frame->missing != NULL) {
-    int64_t key = (int64_t)addr;
-    if (ht_get(current_frame->missing, &key) != NULL)
-      return;
-  }
-  abd_record_addr_size(&current_frame->missing, addr, size);
+  long o = owner_depth < 0 ? 0 : owner_depth; /* UNMAPPED_VAL -> environment */
+  abd_events_push((uint64_t)addr, (uint64_t)size, o, accessor_depth);
+  abd_dump_pre_once(addr);
 }
 
 void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
@@ -224,49 +300,116 @@ void cn_abd_record_post_remaining(uintptr_t addr, size_t size) {
 
   abd_record_addr_size(&current_frame->post_remaining, addr, size);
 
-  /* Dump H_exit heap neighborhood around the leaked address */
-  dump_heap_neighborhood("post", addr);
+  /* Dump exit-heap neighborhood around the leaked range */
+  dump_heap_neighborhood("post", current_frame->dp_idx, addr);
+  if (size > 64)
+    dump_heap_neighborhood("post", current_frame->dp_idx, addr + size - 1);
 }
 
-void cn_abd_record_var(
-    const char *name, uintptr_t value, size_t size) {
+/* ---------- Leak check + release (B-Ret) ---------- */
+
+typedef struct abd_range {
+  uint64_t k0;
+  uint64_t k1;
+} abd_range;
+
+typedef struct abd_leak_ctx {
+  long caller_depth;
+  abd_range *ranges;
+  size_t n;
+  size_t cap;
+} abd_leak_ctx;
+
+static void abd_leak_collect_cb(rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx_) {
+  abd_leak_ctx *ctx = (abd_leak_ctx *)ctx_;
+  if ((long)v <= ctx->caller_depth)
+    return;
+  if (ctx->n == ctx->cap) {
+    size_t cap = ctx->cap ? ctx->cap * 2 : 64;
+    abd_range *grown = realloc(ctx->ranges, cap * sizeof(abd_range));
+    if (!grown)
+      return;
+    ctx->ranges = grown;
+    ctx->cap = cap;
+  }
+  ctx->ranges[ctx->n++] = (abd_range){.k0 = k0, .k1 = k1};
+}
+
+void cn_abd_leak_check_and_release(long caller_depth) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
+  /* Collect first (mutating the rmap during foreach is not safe), ... */
+  abd_leak_ctx ctx = {.caller_depth = caller_depth, .ranges = NULL, .n = 0, .cap = 0};
+  rmap_foreach(cn_ownership_global_ghost_state, abd_leak_collect_cb, &ctx);
+  /* ... then record Lambda and release it to the caller. */
+  for (size_t i = 0; i < ctx.n; i++) {
+    uint64_t k0 = ctx.ranges[i].k0;
+    uint64_t k1 = ctx.ranges[i].k1;
+    cn_abd_record_post_remaining((uintptr_t)k0, (size_t)(k1 - k0 + 1));
+    ownership_ghost_state_set((int64_t)k0, (size_t)(k1 - k0 + 1), (int)caller_depth, NULL);
+  }
+  free(ctx.ranges);
+}
+
+/* ---------- Variables ---------- */
+
+static void abd_record_var_in(
+    hash_table *vars, int *count, const char *name, uintptr_t value, size_t size) {
   cn_abd_var_entry *entry = malloc(sizeof(cn_abd_var_entry));
   entry->name = name;
   entry->value = value;
   entry->size = size;
 
   int64_t *heap_idx = malloc(sizeof(int64_t));
-  *heap_idx = current_frame->pre_var_count;
-  ht_set(current_frame->pre_vars, heap_idx, entry);
-  current_frame->pre_var_count++;
+  *heap_idx = *count;
+  ht_set(vars, heap_idx, entry);
+  (*count)++;
+}
+
+void cn_abd_record_var(const char *name, uintptr_t value, size_t size) {
+  if (!abd_enabled || current_frame == NULL)
+    return;
+  abd_record_var_in(
+      current_frame->pre_vars, &current_frame->pre_var_count, name, value, size);
+}
+
+void cn_abd_record_post_var(const char *name, uintptr_t value, size_t size) {
+  if (!abd_enabled || current_frame == NULL)
+    return;
+  abd_record_var_in(
+      current_frame->post_vars, &current_frame->post_var_count, name, value, size);
+}
+
+/* ---------- mark_post: end of user precondition evaluation ---------- */
+
+static void abd_owned_pre_cb(rmap_key_t k0, rmap_key_t k1, rmap_value_t v, void *ctx_) {
+  cn_abd_frame *frame = (cn_abd_frame *)ctx_;
+  if ((long)v != frame->depth)
+    return;
+  abd_record_addr_size(&frame->owned_pre, (uintptr_t)k0, (size_t)(k1 - k0 + 1));
 }
 
 void cn_abd_mark_post(void) {
   if (!abd_enabled || current_frame == NULL)
     return;
 
-  /* Snapshot pre-state */
-  current_frame->pre_missing = current_frame->missing;
+  /* Snapshot the ownership this activation holds after evaluating the user
+     precondition (user footprint + parameter/local cells).  This is what
+     the sandwich upper bound B_j subtracts from the heap. */
+  rmap_foreach(cn_ownership_global_ghost_state, abd_owned_pre_cb, current_frame);
 
-  /* Start fresh for post-state */
-  abd_reset_missing_state(current_frame);
-
-  /* Dump H_entry: heap neighborhoods of all pointer-sized function arguments.
-     This captures the heap structure visible at function entry (before the body
-     executes), which is what pre-condition inference needs. */
+  /* Dump entry-heap neighborhoods of all pointer-sized function arguments. */
   for (int i = 0; i < current_frame->pre_var_count; i++) {
     int64_t idx = i;
     cn_abd_var_entry *entry = ht_get(current_frame->pre_vars, &idx);
     if (entry != NULL && entry->size == 8 && entry->value != 0) {
-      dump_heap_neighborhood("pre", (uintptr_t)entry->value);
+      dump_heap_neighborhood("pre", current_frame->dp_idx, (uintptr_t)entry->value);
     }
   }
 }
 
-/* JSON output helpers */
+/* ---------- JSON output ---------- */
 
 static void dump_vars_json(FILE *out, hash_table *vars, int count) {
   fprintf(out, "[");
@@ -283,10 +426,10 @@ static void dump_vars_json(FILE *out, hash_table *vars, int count) {
   fprintf(out, "]");
 }
 
-static void dump_missing_json(FILE *out, hash_table *missing) {
+static void dump_ranges_json(FILE *out, hash_table *ranges) {
   fprintf(out, "[");
-  if (missing != NULL) {
-    hash_table_iterator it = ht_iterator(missing);
+  if (ranges != NULL) {
+    hash_table_iterator it = ht_iterator(ranges);
     bool first = true;
     while (ht_next(&it)) {
       if (!first)
@@ -312,12 +455,17 @@ void cn_abd_dump_summary(FILE *out) {
     if (!first)
       fprintf(out, ",");
 
-    fprintf(out, "{\"function\":\"%s\",\"pre\":{\"vars\":", dp->function_name);
+    fprintf(out, "{\"dp\":%d,\"function\":\"%s\",\"pre\":{\"vars\":",
+        dp->dp_idx, dp->function_name);
     dump_vars_json(out, dp->pre_vars, dp->pre_var_count);
+    fprintf(out, ",\"owned\":");
+    dump_ranges_json(out, dp->owned_pre);
     fprintf(out, "},\"body\":{\"missing\":");
-    dump_missing_json(out, dp->body_missing);
-    fprintf(out, "},\"post\":{\"remaining\":");
-    dump_missing_json(out, dp->post_remaining);
+    dump_ranges_json(out, dp->body_missing);
+    fprintf(out, "},\"post\":{\"vars\":");
+    dump_vars_json(out, dp->post_vars, dp->post_var_count);
+    fprintf(out, ",\"remaining\":");
+    dump_ranges_json(out, dp->post_remaining);
     fprintf(out, "}}");
 
     first = false;
