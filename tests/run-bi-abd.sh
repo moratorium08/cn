@@ -174,6 +174,66 @@ expectations_for() {
         '/* precondition inference failed */' \
         '/* postcondition inference failed */'
       ;;
+    adversarial_array_two_cells.c)
+      printf '%s\n' \
+        '/* Function: sum2 */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_global_list_anchor.c)
+      printf '%s\n' \
+        '/* Function: global_length */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_nested_scalar_chain.c)
+      printf '%s\n' \
+        '/* Function: nested_load */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_sized_list_constant.c)
+      printf '%s\n' \
+        '/* Function: list_sum3 */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_void_cast_scalar.c)
+      printf '%s\n' \
+        '/* Function: load_void */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_array_arg_index.c)
+      printf '%s\n' \
+        '/* Function: load_at */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_field_boundary_segment.c)
+      printf '%s\n' \
+        '/* Function: segment_sum */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_list_via_pointer_pointer.c)
+      printf '%s\n' \
+        '/* Function: indirect_length */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_sized_list_arg_plus_one.c)
+      printf '%s\n' \
+        '/* Function: length_plus_one_case */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
+    adversarial_struct_array_element.c)
+      printf '%s\n' \
+        '/* Function: second_pair_sum */' \
+        '/* precondition inference failed */' \
+        '/* postcondition inference failed */'
+      ;;
     baseline_pair_pre_post.c)
       printf '%s\n' \
         '/* Function: sum_pair */' \
@@ -345,6 +405,16 @@ main() {
       example_hard_malloc_constructor.c
       example_hard_global_counter.c
       example_hard_cycle.c
+      adversarial_array_two_cells.c
+      adversarial_global_list_anchor.c
+      adversarial_nested_scalar_chain.c
+      adversarial_sized_list_constant.c
+      adversarial_void_cast_scalar.c
+      adversarial_array_arg_index.c
+      adversarial_field_boundary_segment.c
+      adversarial_list_via_pointer_pointer.c
+      adversarial_sized_list_arg_plus_one.c
+      adversarial_struct_array_element.c
     )
   fi
 

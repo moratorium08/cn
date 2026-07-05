@@ -1,719 +1,557 @@
-# Implementation Plan: Concrete Bi-Abduction for CN
+# Bi-Abduction Implementation Plan (v2)
 
-This plan turns the algorithm described in `IDEA.md` (Sections 3 and 4) and
-`main.tex` into a working, incrementally-built implementation on top of the
-existing `bi-abd` branch. It was produced by comparing the branch against
-`main` (`git diff main`) and reading every module under `lib/bi_abduction/`,
-the runtime support in `runtime/libcn/`, the Fulminate integration in
-`lib/fulminate/`, and the test suite in `tests/bi-abd/`.
+**Audience.** This plan is an implementation handoff: the work items below are
+specified so that they can be implemented without further design input (target
+implementer: Claude Opus 4.8).  Before touching code, read
+`lib/bi_abduction/CLAUDE.md` (architecture, wire formats, CN/Cerberus
+conventions — especially the module-shadowing pitfalls) and skim
+`sec-biabduction.tex` / `sec-inference.tex` for the semantics this
+implementation realises.  `lib/bi_abduction/TODO.md` tracks fine-grained
+leftovers per area.
 
-*Note: `main.tex` only includes the abstract in this repository (the
-`sec-*.tex` files it `\input`s are absent), so the algorithmic detail is taken
-from `IDEA.md` Sections 3–4, which the abstract of `main.tex` matches
-(bi-abductive operational semantics; footprint functions; learning from
-sandwich constraints `A_j ⊆ F(d_j) ⊆ B_j`; disjoint cover).*
-
----
-
-## 1. The intended algorithm (IDEA.md §3–4, main.tex)
-
-The system has two halves.
-
-**(a) Bi-abductive execution semantics (IDEA.md §3, "per-trace bi-abduction"
-in main.tex).** Run the Fulminate-instrumented program, but instead of failing
-on a missing-ownership error, *grant* the ownership, record the address in a
-per-activation missing set `M`, and continue (`ABD_UNOP_DEREFERENCE`,
-`ABD_SPEC_OWNED`, and their `_UNSAFE` variants). At each function return,
-record a *data point* and propagate the activation's missing set to the caller
-(the `CALL`/`return` rules). Per main.tex, this computes the unique *least*
-anti-frame/frame pair per activation: the anti-frame is exactly what the
-activation's subtree touched but was not given; the frame (leftover
-postcondition) is what remains owned at the leak check.
-
-Each data point for a function `f` is
-
-```
-d_j = (V_j, H_j, A_j, B_j)
-```
-
-- `V_j`: concrete environment (spec variables → values),
-- `H_j`: the concrete heap at the point of interest (entry heap for
-  preconditions, exit heap for postconditions),
-- `A_j`: **lower bound** — addresses that *must* be owned (the missing set),
-- `B_j`: **upper bound** — addresses that *may* be owned (everything not
-  already owned by the user's existing partial specification or by other
-  frames), with `A_j ⊆ B_j`.
-
-**(b) Inference from data points (IDEA.md §4, "learning from sandwich
-constraints" in main.tex).** Given data points, a set of user-defined
-predicates, and a set of candidate *qualifiers* `Q` (candidate `take` bindings:
-`RW<T>(t)`, `P(t, t1..tk)`, `each(...){...}`, over terms `t` built from
-in-scope variables), find `Q' ⊆ Q` such that **for every data point** `d_j`:
-
-1. `F(q, d_j) ≠ ⊥` for all `q ∈ Q'` — the qualifier *evaluates successfully*
-   under the standard operational semantics of the CN specification language
-   on the concrete heap `H_j` and environment `V_j`;
-2. `A_j ⊆ ⋃ F(q_i, d_j) ⊆ B_j` — the sandwich constraint;
-3. the footprints `F(q_i, d_j)` are pairwise disjoint.
-
-The algorithm is: **Enumerate** qualifiers → **Filter**
-(`F(q,d) ≠ ⊥ ∧ F(q,d) ⊆ B_j ∧ F(q,d) ∩ A_j ≠ ∅` for all `j`) → **Cover**
-(disjoint set cover, NP-hard in general; greedy/ILP acceptable) → **Rank**.
-Two refinements are essential:
-
-- **Qualifier chains (§4.4):** qualifiers may depend on values bound by
-  earlier ones (`take X = RW<struct node>(p); take Q = RW<int>(X.ptr);`), and
-  chains sharing a prefix must be merged rather than declared non-disjoint.
-- **Guided enumeration (§4.5):** rather than enumerating all well-typed
-  instantiations, use the concrete heap as a *memory graph*, use
-  *explainable* values (values of terms over `V_j`) as anchors, extract a
-  *traversal summary* from each predicate definition (which fields its
-  recursive unfolding follows), and only propose predicate instances whose
-  traversal connects an explainable anchor to the missing region. Remaining
-  arguments (e.g. a list segment's end pointer) are recovered from where the
-  concrete unfolding must *stop*, not guessed up front.
+**The test suite is the specification.**  Every work item below is driven by
+named tests in `tests/bi-abd/`, run by `tests/run-bi-abd.sh`.  Tests currently
+expecting `/* ... inference failed */` are *honest failures* pinning the
+supported-fragment boundary; a work item "flips" a test when it turns that
+failure into a correct suggestion.  A work item is done when (a) its driving
+tests flip to the specified outputs, (b) every other test still passes, and
+(c) no test ever flips from honest failure to a *wrong* suggestion.
 
 ---
 
-## 2. Intended algorithm vs. current implementation
+## 1. Current status
 
-The current pipeline (`lib/bi_abduction/`, runtime
-`runtime/libcn/src/cn-executable/bi_abduction.c`, driver
-`bin/bi_abd_infer.ml`) is:
+Implemented (Steps 0–3 of the original plan; commits `01fc8f733`,
+`7dd39eb7f`, `984fc6041`, `35c8159da`, `db8b01554`):
 
-parse `cn_abd_summary.json` + `cn_abd_heap.jsonl` → group data points by
-function → pick **one representative data point** (largest missing set) →
-build memory graph → enumerate qualifiers **naively** (every well-typed iarg
-assignment from args + small constants) → compute footprints → greedy disjoint
-cover → print `take _ = ...;` suggestions.
+- **Runtime** (`runtime/libcn/src/cn-executable/bi_abduction.c`): global
+  abduction-event log `(a, size, o, d)` (the paper's lazy interval
+  representation); per-activation anti-frames materialised at pop as
+  `A_i = {a | event in span, o < depth_i ≤ d}`; leak set Λ recorded and
+  *released to the caller* at return (B-Ret); per-activation (`dp`-keyed)
+  wire schema with `pre.owned` (complement of the sandwich upper bound `B`)
+  and `post.vars` (including `return` for scalar/pointer returns); pre-heap
+  neighborhoods dumped for *every* activation in an event's interval.
+- **Footprints**: `F(σ,V,H)` computed by a generated C harness
+  (`fp_codegen.ml` / `fp_runner.ml`) that compiles candidates with
+  Fulminate's own predicate codegen and evaluates them against the recorded
+  per-dp heap snapshot (`cn_load_hook`; failures → ⊥ via a `siglongjmp`
+  callback).  Never re-implement CN semantics in OCaml — extend the harness.
+- **Inference** (`infer.ml`, `cover.ml`): data-relative across *all*
+  activations (condition (†)): candidates must evaluate on every dp, avoid
+  every dp's `owned_pre`, and Cover works over per-dp footprint maps with
+  per-dp disjointness, greedy by newly-covered `A` bytes, ties broken by
+  least over-approximation `Σ_j |F_j \ A_j|`.  Pre/post phases succeed or
+  fail independently.
+- **Qualifiers** (`qualifier.ml`): chains of named `take` steps.  Enumerated
+  today: `RW<T>(arg)`; `P(arg, iargs)` with iargs from in-scope args + small
+  constants; depth-2 chains `take W = RW<struct S>(arg); take _ = Q(W.field)`
+  with one stable prefix per argument, shared between chains (Cover works on
+  canonical *steps*; shared steps counted once; printer merges).
 
-| Intended (IDEA.md / main.tex) | Current implementation | Gap |
+Working end-to-end (see `example_*.c`): list/tree/dlist traversals and
+mutations including recursion (one dp per activation), wrapper chains, mixed
+covers (`IntList(p)` + `RW` out-parameters), early-exit traversals,
+multi-call generalisation, NULL-guarded predicates, partial-spec `B`
+filtering, cyclic-list rejection-not-divergence.
+
+## 2. Currently-failing tests → work items
+
+| Test (function) | Needed capability | Work item |
 |---|---|---|
-| §3 semantics: per-activation `M`, propagate to caller at return, leak check gives frame | `bi_abduction.c`: frame stack with `missing`/`pre_missing`/`post_remaining`; `pop_frame` merges into parent; `cn_postcondition_leak_check` collects the remainder (`utils.c: abd_leak_collect_cb`) | **Mostly implemented.** But auto-granted ghost-state entries are never cleaned up at frame pop, so later calls in the same run see stale ownership; leak sets from distinct calls contaminate each other (`baseline_multi_call_list.c` fails for this reason). |
-| `H_j`: the concrete heap per data point | 64-byte neighborhoods around pointer args (`pre`, dumped in `cn_abd_mark_post`) and around leaked addresses (`post`); **all dumps of all activations merged into one global table** (`Data_point.heap_lookup`) | Heap is not per-data-point (stack addresses reused across calls collide); entry heap misses anything > 64 bytes from an argument, so pointer chains that leave the neighborhood are invisible. |
-| `F(q, d)` computed by the *operational semantics of the CN spec language* | `Owned` footprint: correct byte range when the pointer is a bare variable (`footprint.ml: owned_footprint`). Predicate footprint: `predicate_footprint_from_graph` = "reachable struct bytes ∩ missing set". Guards, `assert`s, iargs, clause structure all **ignored** | **The central gap.** `F(q,d) ≠ ⊥` is never actually checked for predicates; `extra_predicate_body_ignored.c` deliberately pins the wrong answer (`NegList(p)` suggested for a positive-value list). Iargs don't affect footprints, so `IntListSeg(xs, end)` vs `IntListSeg(xs, xs)` are indistinguishable. |
-| `B_j` upper bound; `F(q,d) ⊆ B_j` filter; respect for partial specs | `B` is implicitly "everything". Nothing records what the user's spec already owns; suggestions may double-own | Not implemented. |
-| Cover over **all** data points simultaneously | Cover over one representative data point; other executions discarded | Not implemented (explicitly deferred in `TODO.md`). |
-| Qualifier chains with prefix merging (§4.4) | Only flat top-level qualifiers rooted at function arguments | Not implemented (`baseline_wrapper_lists.c` fails for this reason). |
-| Guided enumeration: anchors, traversal summaries (§4.5) | `memory_graph.ml` exists (BFS over struct layouts + pointer derefs) but `enumerator.ml` **ignores it** (`ignore graph; ignore var_addrs`) and enumerates all well-typed combinations | Graph is built but unused by enumeration; no traversal summaries; combinatorial iarg blowup for predicates with several args. |
-| Iterated resources (`each`) | `Request.Q` returns `None` everywhere | Not implemented. |
-| Ranking (§5) | Greedy cover order only | Not implemented (`extra_nonrecursive_predicate_ignored.c` pins `RW<struct pair>` over the semantically nicer `PairCell(p)`). |
-| Least-solution minimality (main.tex: least anti-frame) | Cover only checks footprints intersect the missing set; a candidate strictly larger than needed wins ties arbitrarily | Partially: `A` is the least per-trace answer, but qualifier selection doesn't prefer minimal over-approximation. |
+| `adversarial_array_two_cells` (`sum2`) | shifted Owned anchors, constant index | WI-1 |
+| `adversarial_array_arg_index` (`load_at`) | shifted Owned anchors, argument index | WI-1 |
+| `adversarial_struct_array_element` (`second_pair_sum`) | shifted Owned anchors, struct element | WI-1 |
+| `adversarial_void_cast_scalar` (`load_void`) | pointee-type hypotheses for `void*` args | WI-1 |
+| `adversarial_nested_scalar_chain` (`nested_load`) | depth-3 chains, scalar leaf | WI-2 |
+| `adversarial_list_via_pointer_pointer` (`indirect_length`) | chains through scalar-pointer pointees | WI-2 |
+| `example_hard_ptr_chain` (`deref2`) | same | WI-2 |
+| `step3_chain_depth_limit` (`deep_length`) | depth-3 chains | WI-2 |
+| `adversarial_global_list_anchor` (`global_length`) | globals as anchors | WI-3 |
+| `example_hard_global_counter` (`tick`) | globals as anchors | WI-3 |
+| `example_hard_listseg_boundary` (`walk3`) | globals as anchors (boundary `&far_tail1` becomes in-scope) | WI-3 |
+| `example_list_reverse` post (`list_reverse`) | `return` as post anchor | WI-4 |
+| `adversarial_field_boundary_segment` (`segment_sum`) | user-spec bindings as anchors/iargs | WI-5 |
+| `step0_partial_spec_b` (`list_length`) | same (flips from honest failure to completion) | WI-5 |
+| `adversarial_sized_list_constant` (`list_sum3`) | derived integer iargs | WI-6 |
+| `adversarial_sized_list_arg_plus_one` (`length_plus_one_case`) | derived integer iargs (arith over args) | WI-6 |
+| `example_hard_array_fill` (`array_fill`) | `each` iterated resources | WI-7 |
+| `example_hard_malloc_constructor` (`mk_node`) | allocation tracking + WI-4 | WI-8 |
+| `example_hard_cycle` (`cycle_length`) | none — predicate-vocabulary gap, stays honest failure | — |
 
-## 3. Currently supported fragment
+Recommended order: **WI-1 → WI-2 → WI-3 → WI-4 → WI-5 → WI-6 → WI-7 → WI-8**.
+WI-1..WI-5 are independent enough to reorder; WI-7 reuses WI-1's shifted-cell
+machinery; WI-8 requires WI-4.
 
-Programs for which `cn bi-abd file.c` produces a correct suggestion today
-(verified against `tests/run-bi-abd.sh` expectations):
+## 3. Invariants — do not break these
 
-- A single translation unit, `main` marked `trusted`, target functions with
-  `requires true; ensures true` (or trivial specs).
-- Function arguments of pointer-to-scalar, pointer-to-struct, or integer type
-  only. Anything else (struct-by-value, arrays, function pointers) makes
-  `Infer.infer_function` fail loudly (`arg_of_var` → `failwith`).
-- Missing ownership directly rooted at a **function argument**:
-  - `RW<T>(p)` for scalar and struct pointees
-    (`extra_scalar_pointer_missing.c`, `baseline_pair_pre_post.c`,
-    `extra_wrong_struct_type.c` — the *type-correct* struct is chosen because
-    footprints are byte-accurate for `Owned`).
-  - A recursive predicate instance `P(p, ...)` rooted at an argument, when the
-    heap shape (pointer-chase reachability) covers the missing bytes and the
-    relevant nodes happen to sit within the 64-byte dump radius of an argument
-    (stack-allocated lists/trees in the tests:
-    `list_example_nospec.c`, `tree_example_nospec.c`,
-    `extra_null_boundary_argument.c`, `extra_iarg_name_capture.c`).
-- Precondition/postcondition split: body accesses → `requires` candidates;
-  leak-check remainder → `ensures` candidates (this *is* implemented, contrary
-  to the stale first section of `TODO.md`).
-- One call per function per run is the reliable case; a single "representative"
-  call is used when there are several.
+1. **(†) on every data point.**  A candidate must have `F ≠ ⊥` on *every* dp
+   of the function and `F ∩ owned_pre_j = ∅` on every dp.  Never weaken this
+   to "some dp" — it is what prevents unsound suggestions
+   (`step2_null_guard.c` is the sentinel).
+2. **Honest failure beats wrong suggestion.**  When extending enumeration,
+   every new candidate class must be validated by the harness (or an exact
+   analytic footprint); heuristic shape-matching without semantic evaluation
+   is how the pre-rewrite code suggested `NegList(p)` for a positive list.
+3. **Footprints come from Fulminate's own semantics** (the harness), not
+   from a parallel OCaml interpreter.  The only analytic footprints are
+   `Owned` at concretely-evaluable addresses, and they must be exact.
+4. **All runtime changes behind `cn_abd_is_enabled()`**; all codegen changes
+   behind `~bi_abductive`.  The plain Fulminate suites must be unaffected.
+5. **Ties prefer less over-approximation, then earlier enumeration order.**
+   Enumeration order is semantic: flat before chains, predicates before RW
+   in chain leaves.  When adding candidate classes, place them deliberately
+   and document the choice.
+6. Suite must be green at every commit (`tests/run-bi-abd.sh`); expectation
+   updates land in the same commit as the behavior change, with exact
+   observed output strings; `dune fmt` clean.
 
-## 4. Currently unsupported cases
+## 4. Work items
 
-- **Semantic validity of predicate candidates**: guards, `assert`s, and iargs
-  are ignored — `NegList(p)` is wrongly suggested (`extra_predicate_body_ignored.c`).
-- **Multiple calls / multiple executions**: state pollution across calls makes
-  even the easy multi-call case fail (`baseline_multi_call_list.c` expects
-  `inference failed`); no generalisation across data points.
-- **Qualifier chains**: ownership reached through a field of an owned struct
-  (`baseline_wrapper_lists.c` — wrapper struct holding two list heads) cannot
-  be expressed; inference fails.
-- **Partial specifications**: existing `take`s are respected for *collection*
-  (Fulminate grants them, so they don't show up as missing) but not for
-  *suggestion* (candidates may overlap what the user already owns); `B_j` is
-  not tracked.
-- **Return values**: `ensures take R = P(return)` can never be suggested.
-- **Global variables** as anchors.
-- **Arrays / `each`** iterated resources.
-- **Integer iargs that must be *derived*** (lengths, counts, bounds not equal
-  to any in-scope variable or 0/1/−1).
-- **malloc/free**, **loop invariants**, **interprocedural spec reuse**,
-  **ranking**, **source rewriting**.
-- Heap capture beyond 64 bytes of an argument (heap-allocated or long
-  structures silently escape the dump, making predicate unfolding blind).
+### WI-1: Shifted and typed Owned anchors
 
----
+**Flips** (expected new outputs; capture exact `Request.pp` rendering when
+setting expectations):
+- `adversarial_array_two_cells`: pre/post
+  `take _ = RW<signed int>(a);` and
+  `take _ = RW<signed int>(array_shift<signed int>(a, 1));` (two disjoint
+  cells selected by Cover).
+- `adversarial_array_arg_index`: `take _ = RW<signed int>(array_shift<signed int>(a, i))`.
+  With one call, the constant form `array_shift(a, 2)` is equally
+  data-relatively valid — enumerate **argument-indexed shifts before
+  constant-indexed** so the arg form wins the tie (document this in the
+  test's comment; if the constant form is preferred, swap the order).
+- `adversarial_struct_array_element`:
+  `take _ = RW<struct pair>(array_shift<struct pair>(ps, 1));`.
+- `adversarial_void_cast_scalar`: `take _ = RW<signed int>(p);`.
 
-## 5. Incremental plan overview
+**Files / functions.**
+- `lib/bi_abduction/enumerator.ml`:
+  - `owned_qualifiers`: for each pointer arg with `owned_ct = Some ct`
+    (`ct` not void/function), additionally emit
+    `RW<ct>(array_shift<ct>(arg, k))` for `k ∈ int_args @ [1; 2; 3]`
+    (index 0 is the existing plain candidate).  Build the term with
+    `IT.arrayShift_ ~base ~index ct loc` (`lib/indexTerms.ml:714`); it
+    casts the index to `Memory.uintptr_bt` itself, so plain `IT.sym_` for
+    int args and `IT.int_ k loc` for constants are fine as inputs.
+  - For `void*` args (`owned_ct = None` today): give them *hypothesised*
+    pointee types: emit `RW<T>(arg)` for
+    `T ∈ {Sctypes.Integer (Signed Int_)} ∪ all struct tags in struct_defs`.
+    Keep the hypothesis set small; the tie-break (least `|F \ A|`) picks
+    the size matching the observed access.  `arg_of_var` in `infer.ml`
+    currently maps `Pointer Void` to `owned_ct = None` — keep that, and add
+    the hypothesis expansion in the enumerator so it is clearly marked as
+    guessing.
+- `lib/bi_abduction/footprint.ml`:
+  - `eval_pointer_term` must evaluate `ArrayShift` terms:
+    `addr(base) + index * Memory.size_of_ctype ct`, where `base` is a `Sym`
+    resolved from `pre_vars` and `index` is a constant or a `Sym` resolved
+    from `pre_vars` (int args are recorded there).  Return `None` for base
+    value `0` (NULL) as for plain pointers, and `None` for negative
+    resulting addresses.
+  - `compute` for these candidates stays analytic (exact byte range).
+- No harness changes: shifted candidates are `Owned`, computed analytically.
+  (Do **not** add shifted roots for *predicate* candidates in this WI; if a
+  test ever needs `P(a+k)`, that requires `render_raw_value` to support
+  `ArrayShift` — note it in TODO.md instead.)
 
-> **Status note (updated after the `bi-abd/rewrite-footprint` branch and the
-> Step 0 work below):** Step 1's goal — semantic footprints — is implemented,
-> not by an OCaml interpreter but by a generated C harness
-> (`fp_codegen.ml` / `fp_runner.ml`) that runs each candidate through
-> Fulminate's own compiled predicate semantics against the recorded heap
-> (`cn_load_hook` + failure callback ⇒ ⊥).  **Step 0 (done)** then aligned
-> the data structures with the paper:
->
-> - **Runtime, interval semantics**: `bi_abduction.c` now keeps a global
->   *event log* of abduction triples `(a, size, o, d)` (the paper's lazy
->   representation, Cor. 3.14) and materialises each activation's anti-frame
->   at pop as `{a | event in span, o < depth_i ≤ d}`.  The wholesale
->   merge-to-parent and the `pre_missing` workaround are gone; precondition
->   takes already acquire at caller depth (`cn_get_ownership` checks at
->   `cn_stack_depth - 1`), so the interval rule needs no special cases.
-> - **Runtime, Λ release (B-Ret)**: `cn_abd_leak_check_and_release` records
->   the leak set and releases it to the caller, eliminating cross-activation
->   ghost-state contamination.
-> - **Wire schema, dp-keyed**: summary entries and heap-dump lines carry a
->   `dp` activation id; data points carry `pre.owned` (complement of the
->   sandwich upper bound `B_j`) and `post.vars` (incl. `return`); heap
->   neighborhoods are additionally dumped at each first-missing address.
-> - **`B_j` filter**: `infer.ml` rejects candidates whose footprint
->   intersects `owned_pre` — partial-spec-aware suggestion.
-> - **Chain-shaped `Qualifier.t`**: `step list` (name × `Request.t`);
->   singletons today, unblocking Step 3 without interface churn.
->
-> Regression tests: `step0_interval_owner.c` (interval rule; forbidden-output
-> support added to `run-bi-abd.sh`), `step0_partial_spec_b.c` (B filter),
-> and `baseline_multi_call_list.c` flipped from `inference failed` to
-> `IntList(p)`.  The remaining steps below should be read with Step 1
-> reinterpreted as harness-based (done).
->
-> **Step 2 (done):** inference is data-relative across all activations —
-> the representative-dp collapse is gone.  The harness sweeps every dp
-> against its own heap snapshot; condition (†) is applied per candidate
-> (`F ≠ ⊥` on every dp, `F ∩ owned_pre_j = ∅` on every dp); `Cover`
-> works on per-dp footprint maps with per-dp disjointness and a least
-> over-approximation tie-break (`Σ_j |F_j \ A_j|`).  `Owned` footprints
-> are ⊥ at NULL, so base-case activations reject unguarded `RW`
-> candidates in favour of guarded predicates (`step2_null_guard.c`).
->
-> **Step 3 (done, depth 2):** qualifier chains.  The enumerator emits
-> `take W = RW<struct S>(arg); take _ = Q(W.field)` for pointer-typed
-> fields of struct-pointer arguments, with one stable prefix per
-> argument; the harness renders chains as sequential calls (generating
-> `owned_<S>` functions that predicate bodies alone did not induce);
-> Cover decomposes candidates into canonical *steps* so chains share
-> prefixes (§4.4 — a shared step's footprint is counted once), and the
-> printer merges them.  `baseline_wrapper_lists.c` now yields
-> `take b_W = RW<struct list_pair>(b); take _ = IntList(b_W.xs);
-> take _ = IntList(b_W.ys);`; depth ≥ 3 fails honestly
-> (`step3_chain_depth_limit.c`).  Deferred within Step 3: `return` as a
-> post anchor (needs per-phase candidate sets; the value is recorded),
-> chains rooted at user-spec bindings, deeper chains.
+**Acceptance.**  Four adversarial tests flip; `example_hard_array_fill`
+still fails (its 8-cell block exceeds the constant range `k ≤ 3` — this is
+deliberate: `each` must stay necessary; do not raise the constant bound to
+make it pass).
 
-Five steps, each independently landable, each leaving `tests/run-bi-abd.sh`
-green (with deliberate expectation updates) and the standard suites
-(`tests/run-cn.sh`, `tests/run-cn-exec.sh`, fulminate CI) untouched. Runtime
-changes stay behind `cn_abd_is_enabled()`; OCaml changes stay inside
-`lib/bi_abduction/` plus its existing integration points
-(`bin/bi_abd_infer.ml`, the bi-abd hooks in `lib/fulminate/internal.ml`,
-`runtime/libcn/src/cn-executable/bi_abduction.c`).
+**Risks.**  The `arrayShift_` self-cast means the printed term may carry a
+cast (e.g. `array_shift<signed int>(a, (u64)i)`); set the test expectations
+from the *observed* rendering, not from the comment sketches above.
 
-1. **Semantic footprints** — implement `F(q, d)` as a concrete evaluator of CN
-   predicate bodies (the paper's core object), replacing the shape heuristic.
-2. **Faithful data points and multi-execution Cover** — per-activation heaps,
-   per-frame ghost-state hygiene, `B_j` from already-owned addresses, cover
-   over *all* data points, minimality tie-breaking.
-3. **Qualifier chains and return values** — dependent `take`s with prefix
-   merging (§4.4), `return` as a postcondition anchor.
-4. **Guided enumeration and ranking** — anchors + traversal summaries (§4.5)
-   replacing naive enumeration; simple ranking policy.
-5. **Iterated resources (`each`) for arrays** — contiguous-stride detection
-   with bounds restricted to explainable terms.
+### WI-2: Generalised chains (any pointer pointee, depth 3) with per-step harness footprints
 
-Deliberately deferred (see §7): derived integer iargs, loop invariants,
-malloc/free, interprocedural propagation, symbolic post-validation.
+**Flips:**
+- `example_hard_ptr_chain`: `take P = RW<signed int*>(pp); take _ = RW<signed int>(P);`
+  (bound-name rendering: the leaf's pointer term is the prefix's bound sym
+  directly).
+- `adversarial_list_via_pointer_pointer`:
+  `take P = RW<struct node*>(pp); take _ = IntList(P);`.
+- `adversarial_nested_scalar_chain`:
+  `take o_W = RW<struct outer>(o); take I = RW<struct inner>(o_W.in); take _ = RW<signed int>(I.p);`.
+- `step3_chain_depth_limit`: flips to the depth-3 chain ending in
+  `IntList(...)` — update the test's header comment (it documents the old
+  limit) and its expectation.
 
----
+**Design.**  Replace the hardcoded two-step chain enumeration with a
+worklist over *roots*:
 
-### Step 1 — Semantic footprints: a concrete evaluator for qualifiers
+```
+root = { term : IT.t;            (* pointer-valued term *)
+         pointee : Sctypes.t;    (* what it points to *)
+         prefix : Qualifier.step list;  (* steps binding it, [] for args *) }
+```
 
-**Feature summary.** Implement `F(q, d)` per IDEA.md §4.2: evaluate a
-candidate qualifier by the operational semantics of the CN spec language on
-the recorded concrete heap and environment, returning either the exact set of
-consumed byte addresses or ⊥. This makes guards, `assert`s, clause selection,
-and iargs semantically meaningful, and is the prerequisite for every later
-step.
+Seed: one root per pointer argument (and, after WI-3/WI-4/WI-5, per global /
+return / spec-binding anchor).  For a root at depth `< max_chain_depth`
+(new `Enumerator.config` field, default 3):
+- emit leaf candidates `prefix @ [leaf]` for each predicate (iargs as today)
+  and for `RW<pointee>` — predicates before RW (tie order);
+- extend the worklist:
+  - `pointee = Struct S`: bind `W` via `Owned(Struct S)(term)` (one stable
+    `W` sym per root, as today); new roots
+    `{ term = IT.member_ ~member_bt:(Loc ()) (w_term, fid); pointee = pointee_of_field; prefix = prefix @ [W-step] }`
+    for each pointer-typed field;
+  - `pointee = Pointer U` (scalar pointer): bind `P` via
+    `Owned(Pointer U)(term)`; new root
+    `{ term = IT.sym_ (P, Loc (), loc); pointee = U; prefix = prefix @ [P-step] }`.
+  - other pointees: leaf only.
 
-**Relevant files / modules / data structures.**
-- New: `lib/bi_abduction/concrete_eval.ml{,i}`.
-- Modified: `lib/bi_abduction/footprint.ml` (delegate predicate case to the
-  evaluator; delete `predicate_footprint_from_graph`),
-  `lib/bi_abduction/infer.ml` (`infer_function_inner` calls the new
-  footprint), `lib/bi_abduction/memory_graph.ml` (no longer on the footprint
-  path; retained for Step 4).
-- Runtime: `runtime/libcn/src/cn-executable/bi_abduction.c` — in
-  `cn_abd_record_missing`, also `dump_heap_neighborhood("pre", addr)` (first
-  recording of an address only), so the evaluator can chase pointer chains
-  that leave the argument neighborhoods. No format change to
-  `cn_abd_heap.jsonl`.
-- CN core consumed read-only (no modification): `Definition.Predicate.t`
-  (`clauses`, `instantiate`), `Definition.Clause.t` (`guard`, `packing_ft`),
-  `LogicalArgumentTypes.t` (`Define`/`Resource`/`Constraint`/`I`),
-  `Request.t`, `IndexTerms`, `Memory.size_of_ctype`, struct layouts already
-  computed by `Infer.build_struct_layouts`.
+Cap total candidates with the existing `config.max_qualifiers`.
 
-**Implementation strategy.**
-- Define a concrete value type in `concrete_eval.ml`:
+**Per-step harness footprints (replaces the analytic prefix diff).**
+`infer.ml:steps_of` currently reconstructs the prefix footprint analytically
+and only supports length ≤ 2.  Replace with per-step measurement in the
+harness:
+- `fp_codegen.ml`: in the per-qualifier function, after *each* rendered step
+  call `fp_emit_step(out, ...)` variants that snapshot the ghost-state delta
+  (addresses at `FP_PREDICATE_DEPTH`) — emit JSON
+  `{"q":k,"dp":j,"steps":[[...],[...]]}` where `steps[i]` is the *cumulative*
+  set after step `i` (cumulative is simpler to emit; OCaml takes successive
+  differences).  On failure at any step emit `"steps":null`.
+- `fp_runner.ml:parse_results_json` and `fp_table.ml`: value type becomes
+  `Int64Set.t list option` (cumulative sets).  `Footprint.lookup` returns the
+  final set; a new `Footprint.lookup_steps` returns the per-step sets.
+- `infer.ml:steps_of`: for a chain of length n, step-unit `i`'s footprint =
+  `steps[i] \ steps[i-1]`; keys as today (`Pp.plain (Request.pp req)`).
+  Singleton candidates unchanged (one step, final set).
+- Chain rendering (`render_qualifier_stmts`): generalise from the fixed
+  two-step match to a fold over steps, maintaining a binding environment
+  `Sym.t -> C expression`:
+  - struct prefix: `struct <tag>_cn *<name> = owned_struct_<tag>(<ptr>, PRE, (void*)0);`
+    → later `StructMember(sym, fid)` renders as `<name>-><field>`;
+  - scalar-pointer prefix: `cn_pointer *<name> = owned_<u>_pointer(<ptr>, PRE, (void*)0);`
+    → later `Sym name` at Loc renders as `<name>` directly.
+    Owned-function naming: `owned_fn_name` already produces
+    `owned_struct_node_pointer` for `struct node*`
+    (`Utils.str_of_ctype (Pointer t) = str_of_ctype t ^ " pointer"`); the
+    *return type* of the generated owned function for a pointer ctype is
+    `cn_pointer*` — verify once against `Internal.generate_ownership_functions`
+    output before relying on it.
+  - Collect `extra_cts` for every Owned step (prefix and leaf), as today.
 
-  ```ocaml
-  type cval =
-    | VInt of Z.t                       (* integers, bits *)
-    | VPtr of int64                     (* Loc; VPtr 0L = NULL *)
-    | VBool of bool
-    | VStruct of Sym.t * (Id.t * cval) list
-    | VUnit
-  ```
+**Cycle safety.**  Deeper chains whose leaf wraps to a consumed prefix cell
+already fail via the ownership re-claim (⊥) — no new handling needed, but
+keep `example_hard_cycle` green (honest failure).
 
-- `eval_term : env:(Sym.t -> cval option) -> IndexTerms.t -> cval option` for
-  the subset that occurs in predicate bodies and iargs: `Sym`, `Const` (Z,
-  Bits, Null, Bool), `Binop` (arith, comparisons, and/or), `Unop` (not,
-  negation), `ITE`, `StructMember`, `MemberShift`, `ArrayShift`, `EQ`/`LT`/…,
-  `IsNull` (encoded as `EQ` with null), `Cast`. Anything else → `None` (⊥),
-  never a crash — unsupported term forms must degrade to "candidate rejected".
-- Heap reads: build a byte-precise reader on top of the 8-byte-aligned word
-  dumps (`Data_point.heap_lookup`): `read_bytes : heap -> addr:int64 ->
-  size:int -> Z.t option` slices words; struct values are assembled field-by-
-  field from the layout (`(Id.t * int * int) list Sym.Map.t`).
-- `eval_request : fuel:int -> state -> Request.Predicate.t -> (footprint * cval) option`:
-  - `Owned (ct, _)`: footprint = `[addr, addr+size)`, value read from heap
-    (needed because later bindings like `H.next` consume it). Fail (⊥) if any
-    byte is unreadable (outside the dump) or already in the accumulated
-    footprint (disjointness within a single qualifier's unfolding — catches
-    cyclic structures together with the fuel bound).
-  - `PName p`: look up `Definition.Predicate.t`, instantiate clauses with
-    `Definition.Predicate.instantiate` (concrete pointer + iarg values lifted
-    back to `IndexTerms` constants, or evaluate clause-by-clause with an
-    environment — prefer the environment approach to avoid constructing
-    terms), select the **first clause whose guard evaluates to true** (CN
-    clause semantics), then walk its `packing_ft`:
-    `Define` extends the environment; `Resource` recurses (consuming
-    footprint); `Constraint (LC.T it)` evaluates `it` — false or unevaluable ⇒
-    ⊥; `Constraint (LC.Forall _)` ⇒ ⊥ (unsupported, Step 5 territory);
-    `I it` evaluates the return value (the predicate's oarg, needed by
-    enclosing `Define`s/guards).
-  - `Request.Q _` ⇒ ⊥ (until Step 5).
-  - `fuel` (e.g. 4096 unfoldings) guards non-termination; exhaustion ⇒ ⊥.
-- `Footprint.compute` becomes: evaluate the qualifier's pointer and iarg
-  terms in the data-point environment (`dp.pre_vars`), then
-  `Concrete_eval.eval_request`. The existing filter in
-  `Infer.infer_function_inner` (`F ∩ must_cover ≠ ∅`) and `Cover.greedy_cover`
-  stay as they are.
+**Acceptance.**  Four flips above; `baseline_wrapper_lists`,
+`example_stack_peek`, `example_list_append`, `extra_predicate_body_ignored`
+outputs unchanged (their depth-2 chains re-derive under the new enumeration —
+if bound-name rendering changes (`b_W` etc.), keep the naming scheme
+`<root>_W` for struct prefixes to avoid churning expectations).
 
-**Algorithmic content.** This is the footprint function `F(q,d)` of §4.2 /
-main.tex (iii) computed by direct interpretation; determinism of the CN spec
-language makes it a function. Filtering now genuinely checks `F(q,d) ≠ ⊥`.
+**Risks.**  Candidate growth at depth 3 (struct with many pointer fields ×
+predicates): acceptable at test scale; the guided enumeration of the original
+Step 4 remains the long-term fix — record actual candidate counts in the
+commit message.  Per-step JSON is a wire-format change internal to the
+harness: update `fp_codegen.mli` docs and `CLAUDE.md` in the same commit.
 
-**Tests to add / update** (all in `tests/bi-abd/`, expectations in
-`tests/run-bi-abd.sh: expectations_for`).
-- Update `extra_predicate_body_ignored.c`: expectation flips from
-  `take _ = NegList(p);` to *no* `NegList` suggestion (with only `RW` available
-  for the first node and chains not yet implemented, the run should report
-  `/* inference failed */` — that honest failure is the correct baseline
-  answer here).
-- Update `extra_iarg_name_capture.c` / `extra_null_boundary_argument.c`:
-  same expected strings, but now they must hold for *semantic* reasons; add a
-  sibling test `step1_wrong_iarg_rejected.c` where `IntListSeg(xs, xs)` (empty
-  footprint) and `IntListSeg(mid, end)` (doesn't start at the anchor) must
-  lose to `IntListSeg(xs, end)`.
-- New `step1_guarded_clause.c`: predicate with a non-trivial guard (e.g.
-  `EvenList` requiring `H.val % 2 == 0` via `assert`) on a satisfying heap —
-  must be suggested; and on a violating heap — must not be.
-- New failure-mode test `step1_heap_escape.c`: heap-allocated list via a
-  `trusted` malloc wrapper; documents (and after the runtime dump extension,
-  fixes) the "outside dump radius ⇒ candidate rejected, inference fails"
-  behavior.
+### WI-3: Globals as anchors
 
-**Success criteria.** `tests/run-bi-abd.sh` green with updated expectations;
-`NegList` never suggested; `dune build` and `dune runtest` clean; no change to
-non-bi-abd runtime behavior (all new C code behind `cn_abd_is_enabled()`).
+**Flips:**
+- `adversarial_global_list_anchor`: `take _ = IntList(head);` pre/post.
+- `example_hard_global_counter`: `take _ = RW<signed int>(&counter);` pre/post.
+- `example_hard_listseg_boundary` (expected — verify): with `&far_tail1` an
+  in-scope Loc term, the iarg pool for `IntListSeg` gains the boundary:
+  `take _ = IntListSeg(p, &far_tail1);`.  If it flips, rewrite that test's
+  comment (it currently claims the boundary is underivable) and keep a truly
+  underivable variant if desired (heap-allocated tail).
 
-**Risks / dependencies / limitations.**
-- The `IndexTerms` constructor surface is large; mitigate by total
-  pattern-matching with a `None` default and a `Pp.debug 5` note when a term
-  form is rejected, so gaps are visible rather than silent misbehavior.
-- Struct layout duplication: `Infer.build_struct_layouts` re-derives offsets
-  (already flagged risky — it re-implements alignment). Before relying on it
-  for byte-precise reads, cross-check against `Memory.struct_layout`/
-  `Memory.member_offset` from CN core and switch to those if available;
-  this is read-only use of core, not a core change.
-- Evaluation reads the *entry* heap; for postcondition candidates the *exit*
-  heap table is used (already split as `pre_heap_lookup`/`post_heap_lookup`).
-  Mutation between entry and the first access can skew `pre` dumps recorded
-  mid-body; accepted as a documented approximation until Step 2's snapshots.
+**Design.**
+- **Runtime data**: globals must appear in each dp's `pre_vars`, so that the
+  harness (`fp_var_value`) and analytic evaluation resolve them, uniformly
+  with arguments.  Codegen in `lib/fulminate/internal.ml`
+  (`generate_c_specs_internal`, next to `abd_record_args`): for each global
+  `g` from `Cn_to_ail.extract_global_variables cabs_tunit prog5` (already
+  computed in scope — hoist if needed), emit
+  `cn_abd_record_var("&g", (uintptr_t)&g, sizeof(g));` and, when `g` has
+  pointer type, also `cn_abd_record_var("g", (uintptr_t)g, sizeof(g));`
+  (the *entry value*, recorded at push).
+- **Types to OCaml**: `bin/bi_abd_infer.ml` — add
+  `extract_global_defs : sigma -> (string * Sctypes.t) list` from
+  `sigm.A.declarations` (`Decl_object`), thread through `Infer.infer` as
+  `~global_defs`.  In `infer_function`, extend the `args` list with
+  pseudo-args: for global `g : T`, an anchor `{sym = Sym.fresh "&g";
+  bt = Loc (); owned_ct = Some T}`; for `T = Pointer U` additionally
+  `{sym = Sym.fresh "g"; bt = Loc (); owned_ct = Some U}`.  Everything
+  downstream (flat candidates, chains, iarg pools) then works unchanged —
+  the name-keyed variable lookup is what makes this work, and printing a
+  `Sym` named `"&counter"` renders the desired `&counter`.
+  `arg_of_var` must *not* be applied to globals (they are not in
+  `signature_args`); build the pseudo-args separately and filter dp
+  `pre_vars` entries whose names start with `&`/match globals when building
+  argument-derived anchors.
+- **Spec-syntax caveat**: a CN spec using a global needs an `accesses g;`
+  clause (or explicit takes of `&g`).  The suggestions are still just
+  `take` lines; add a one-line hint to the printed output when a suggestion
+  mentions a global (`/* requires 'accesses g;' or ownership of &g */`) —
+  cosmetic, do not gate acceptance on it.
 
----
+**Acceptance.**  Two (likely three) flips; `pre.owned` interaction: globals
+are owned at depth 0, so they are *not* in `owned_pre` and the B filter does
+not reject them — confirm with `step0_interval_owner` still green.
 
-### Step 2 — Faithful data points and multi-execution Cover
+**Risks.**  `sizeof(g)` for array globals records the whole array — fine for
+the value entry being skipped (arrays are not pointer-typed); the `&g` anchor
+with `owned_ct = Some (array T)` — `Sctypes` arrays should be skipped
+(only record scalars/structs/pointers; guard on the ctype).
 
-**Feature summary.** Make the collected data match the paper's
-`d_j = (V_j, H_j, A_j, B_j)`: per-activation heap snapshots, per-frame
-ghost-state hygiene so calls don't contaminate each other, an explicit `B_j`
-(complement of already-owned), and Cover run over **all** data points of a
-function simultaneously with a minimality tie-break.
+### WI-4: `return` as a postcondition anchor (per-phase candidate sets)
 
-**Relevant files / modules / functions.**
-- Runtime `runtime/libcn/src/cn-executable/bi_abduction.c` +
-  `include/cn-executable/bi_abduction.h`:
-  - add a monotonically increasing `activation_id` per `cn_abd_push_frame`;
-    tag every heap-dump line and every data point with it
-    (`{"phase":"pre","dp":7,"words":{...}}`);
-  - record `already_owned` per frame: on `cn_abd_mark_post` (i.e. after the
-    user's precondition has been evaluated), snapshot the ghost-state entries
-    at the current stack depth. This needs a read-only walk of
-    `cn_ownership_global_ghost_state`, exposed via the existing
-    `rmap_foreach` (`runtime/libcn/src/cn-executable/rmap.c`) — same pattern
-    as `abd_leak_collect_cb` in `utils.c`;
-  - frame-pop hygiene: on `cn_abd_pop_frame`, downgrade/remove the
-    ghost-state entries that were *auto-granted* by
-    `report_and_correct_missing_ownership` during this activation, so
-    subsequent calls start clean. Track auto-granted ranges in the frame
-    (they are exactly the `missing` entries) and reset them to unmapped via
-    `ownership_ghost_state_remove` unless they were leaked on purpose.
-    *Investigate first*: reproduce `baseline_multi_call_list.c`'s failure and
-    confirm this is the contamination mechanism before changing state
-    handling (per the repo's own caution about state-changing fixes).
-- `lib/bi_abduction/data_point.ml`: parse `dp` ids; give each `data_point`
-  its own `pre_heap : int64 -> int64 option`, `post_heap`, and
-  `already_owned : Int64Set.t`; delete the global merged `heap_lookup` path.
-- `lib/bi_abduction/infer.ml`: drop the representative-selection fold;
-  `infer_function` now computes, per candidate `q`,
-  `F(q, d_j)` for **every** `d_j`, applies the paper's filter
-  (`∀j. F ≠ ⊥ ∧ F ⊆ B_j ∧ F ∩ A_j ≠ ∅`), and calls Cover with per-data-point
-  footprints.
-- `lib/bi_abduction/cover.ml`: generalise `candidate` to
-  `{ qualifier; footprints : Int64Set.t list (* per dp *) }`; greedy selection
-  now scores by total newly-covered `A` bytes across data points, maintains
-  disjointness per data point, and tie-breaks by minimal over-approximation
-  `Σ_j |F(q,d_j) \ A_j|` (the concrete analogue of main.tex's *least*
-  anti-frame).
+**Flips:** `example_list_reverse` post: `take _ = IntList(return);`.
 
-**Implementation strategy.**
-- `B_j` is realised as `B_j = Addr \ already_owned_j` and the filter
-  `F(q,d_j) ⊆ B_j` implemented as `F(q,d_j) ∩ already_owned_j = ∅`. This is
-  exactly the "do not overlap user-provided partial specifications" design
-  constraint from IDEA.md §1, and it makes partial-spec-aware suggestion work
-  without parsing user specs on the OCaml side.
-- Keep the `A_j ⊆ ⋃F` acceptance check per data point; if any data point is
-  left uncovered, report `inference failed` as today (`qualifiers = None`).
-- The NULL-call data point (e.g. `list_length(NULL)`) has `A_j = ∅`; the
-  filter clause `F ∩ A_j ≠ ∅` must be applied only to *non-empty* `A_j`
-  (IDEA.md marks it as a removable heuristic); `IntList(p)` evaluates on it to
-  the empty footprint via the `is_null` guard — a good end-to-end check that
-  Step 1's evaluator handles base cases.
+**Design.**  The value is already recorded (`post.vars` carries `return`).
+- `bin/bi_abd_infer.ml`: extend `function_args` to carry the return ctype:
+  `(string * ((string * Sctypes.t) list * Sctypes.t option)) list`
+  (from `Decl_function`'s return type; `None` for void/unsupported).
+- `infer.ml`: split candidate enumeration per phase.  `candidates_pre` =
+  enumeration over arg+global anchors (as now).  `candidates_post` =
+  the same plus, when the return type is `Pointer T`, an anchor
+  `{sym = Sym.fresh "return"; bt = Loc (); owned_ct = Some T}` (participates
+  in flat candidates *and* chains).  Keep one global `q_idx` space: index
+  pre candidates first, then post-only candidates, so `Fp_table` keys stay
+  unambiguous; run the pre harness with pre candidates and the post harness
+  with post candidates.
+- `fp_codegen.ml`: dp variable tables must include post vars for name
+  resolution — emit `e.dp.pre_vars @ e.dp.post_vars` into `VARS_DP%d` (the
+  pre harness never receives return-rooted candidates, so the extra entries
+  are inert there); `dp_has_all_syms` similarly checks both lists.
+- Footprint analytic path (`eval_pointer_term`): resolve names against
+  `pre_vars @ post_vars`.
 
-**Algorithmic content.** Implements Cover exactly as §4.2–4.3 (all-`j`
-filtering + disjoint cover), plus least-solution tie-breaking; realises the
-sandwich constraint with a concrete `B_j`.
+**Acceptance.**  `list_reverse` flips (pre unchanged); `example_list_append`
+post output may change if a return-rooted candidate ties — it should not
+(void return); assert unchanged.  All Owned-at-NULL and (†) checks apply to
+post candidates only on post dps — note: `F(q, d_j)` for a post-only
+candidate is still required on **every** dp (each dp has its own return
+value; a NULL return on some dp correctly ⊥-rejects `RW<T>(return)` but not
+guarded predicates).
 
-**Tests to add / update.**
-- Update `baseline_multi_call_list.c`: expectation flips from
-  `/* inference failed */` to `take _ = IntList(p);` — the flagship win of
-  this step (length-1, length-3 and NULL calls must all be explained by one
-  qualifier).
-- New `step2_partial_spec_no_overlap.c`: `requires take X = RW<struct node>(p);`
-  with the body traversing the full list; suggested candidates must not
-  include anything whose footprint covers `p`'s first node (with chains not
-  yet available the honest outcome is `inference failed`; the assertion is
-  specifically that `IntList(p)` is *not* suggested).
-- New `step2_two_shapes_consensus.c`: two calls with different shapes where a
-  single-run answer would be over-specific (e.g. `RW<struct node>(p)` fits a
-  1-node run but not a 3-node run) — must produce the predicate, not the
-  `RW`.
-- Negative case `step2_incompatible_runs.c`: two calls whose missing sets
-  cannot be explained by any common qualifier (e.g. one run passes a struct
-  pointer, another an int pointer via a union-ish setup) — expect
-  `inference failed`, not a wrong spec.
+**Risks.**  Functions where `return` aliases an argument (e.g. identity)
+create equal-footprint candidates; tie order (args enumerated before
+`return`) keeps current outputs stable.
 
-**Success criteria.** Multi-call tests green; all Step-1 tests still green;
-`tests/run-cn-exec.sh` (Fulminate suite) unaffected — in particular the
-ghost-state hygiene change must be a no-op when `cn_abd_is_enabled()` is
-false.
+### WI-5: User-spec bindings as anchors and iarg sources
 
-**Risks / dependencies / limitations.**
-- Ghost-state cleanup at pop is the riskiest change (it touches the shared
-  rmap); guard it entirely behind `cn_abd_is_enabled()` and land it with the
-  reproduced-bug evidence.
-- Heap snapshot volume grows with activation count; the dump-on-record scheme
-  from Step 1 keeps it proportional to missing bytes, which is acceptable for
-  test-sized programs. Whole-heap snapshots and the "re-running" scheme from
-  IDEA.md's thinking log are explicitly out of scope.
-- Depends on Step 1 (semantic `F` is what makes cross-data-point filtering
-  meaningful).
+**Flips:**
+- `adversarial_field_boundary_segment`: pre
+  `take L = IntListSeg(box.start, box.stop);` and post
+  `take L2 = IntListSeg(box2.start, box2.stop);` (names bound by the user's
+  own `take box = ...` / `take box2 = ...`).
+- `step0_partial_spec_b`: flips from double honest failure to
+  `take _ = IntList(First.next);` pre / `take _ = IntList(First2.next);`
+  post — rewrite that test's comment and expectations (it currently
+  documents the failure), and keep the *forbidden* `IntList(p)` check.
 
----
+**Design.**  Record the concrete values of user `take`-bound names and
+expose them as anchors, per phase.
+- **Codegen** — the robust place is inside the spec-to-C translation, where
+  binder names and types are known: `lib/fulminate/cn_to_ail.ml`
+  (`cn_to_ail_pre_post` internals, where each precondition/postcondition
+  `Resource` binder `X` is bound to a C local).  Behind the `bi_abductive`
+  flag (thread it in from `internal.ml` — `cn_to_ail_pre_post` gains an
+  optional `~bi_abd_record:(string -> unit)`-style parameter or a boolean
+  that makes it also emit recording statements):
+  - binder `X : Loc` (a pointer take, e.g. `RW<τ*>` or a pointer-returning
+    predicate): emit `cn_abd_record_var("X", (uintptr_t)cn_pointer_unwrap(X_cn), 8);`
+    (find the actual accessor for `cn_pointer`'s raw value — `->ptr` per the
+    generated code);
+  - binder `X : Struct S` (an `RW<struct S>` take): for each pointer-typed
+    field `f`: `cn_abd_record_var("X.f", (uintptr_t)X_cn->f->ptr, 8);`.
+  - Precondition binders → `cn_abd_record_var` (pre vars); postcondition
+    binders → `cn_abd_record_post_var`.
+  Use the binder's *source name* (what `Sym.pp_string` gives for the
+  user-written name) — this is what makes the suggestion `IntListSeg(box.start, …)`
+  read as CN the user can paste (pre/post are one scope in CN, so pre
+  binders are legal in ensures too).
+- **OCaml**: dp `pre_vars`/`post_vars` now contain entries named `X` and
+  `X.f`.  Add them as anchors (Loc pseudo-args) in the respective phase's
+  candidate set; they also enter `choices_for_bt (Loc ())`, which is what
+  puts `box.stop` in the `IntListSeg` iarg pool.  Types: unknown from the
+  signature — treat as `owned_ct = None` anchors (predicate roots and iargs
+  only) in the first cut; typed chains from spec bindings can follow later.
+- **B-filter sanity**: candidates rooted at spec bindings cover memory
+  *adjacent to* but not inside the user footprint (`IntListSeg(box.start,
+  box.stop)` stops exactly where the user's `IntList(box.stop)` begins) —
+  the per-dp `owned_pre` check enforces this; no changes needed, but this is
+  the acceptance check that matters.
 
-### Step 3 — Qualifier chains and return values
+**Acceptance.**  Two flips; `extra_*` and `example_*` outputs unchanged
+(functions without user takes get no new anchors).
 
-**Feature summary.** Support dependent qualifiers (§4.4): candidates rooted at
-values bound by earlier `take`s (`take W = RW<struct wrap>(w); take L =
-IntList(W.head);`), with prefix sharing during cover; and make `return`
-available as a postcondition anchor (`ensures take R = IntList(return);`).
+**Risks.**  The generated C local name for a binder (`X_cn` vs a
+sym-numbered variant) — do the recording inside `cn_to_ail` where the Ail
+symbol is in hand, not by string-guessing in `internal.ml`.  This is the WI
+with the deepest Fulminate integration; budget review time for the
+`cn_to_ail_pre_post` change and keep it minimal (one optional parameter).
 
-**Relevant files / modules / functions.**
-- `lib/bi_abduction/qualifier.ml`: a chain type replaces the bare alias:
+### WI-6: Derived integer iargs (search + term fitting)
 
-  ```ocaml
-  type step = { name : Sym.t; req : Request.t }   (* take name = req *)
-  type t = step list   (* dependency-ordered; later steps may mention earlier names *)
-  ```
+**Flips:**
+- `adversarial_sized_list_constant`: `take _ = SizedList(p, 3i32);`.
+- `adversarial_sized_list_arg_plus_one`: `take _ = SizedList(p, n + 1i32);`
+  — with a single call, the constant `3i32` also satisfies (†); prefer
+  arg-based terms over constants in the fitting order so the general form
+  wins.  (Better: add a second call with a different length to the test to
+  make the constant unfittable — coordinate with the test owner.)
 
-  `pp` prints named takes (`take W = RW<struct wrap>(w); take _ =
-  IntList(W.head);`); equality is modulo bound-name alpha-renaming keyed by
-  the request they're bound to.
-- `lib/bi_abduction/concrete_eval.ml`: evaluate a chain by threading the
-  environment (each step's oarg value is bound to its `name`) and the
-  accumulated footprint; the chain footprint is the disjoint union, per-step
-  footprints retained for prefix merging.
-- `lib/bi_abduction/enumerator.ml`: iterative deepening — round 0 enumerates
-  the current root terms (arguments; plus `return` for the post phase); after
-  evaluating round-`k` candidates, extend the term pool with `X.field` for
-  every struct oarg `X` bound in a surviving candidate whose field is
-  pointer-typed, and enumerate one more round; bound the depth
-  (`config.max_chain_depth`, default 2) and total candidates
-  (`config.max_qualifiers`, already present).
-- `lib/bi_abduction/cover.ml`: prefix merging per §4.4 — canonicalise each
-  chain step by the pair (evaluated footprint of the step, request-with-
-  concrete-root); two chains sharing the canonical first step are *mergeable*,
-  and disjointness is checked on the union of distinct canonical steps rather
-  than naively per chain. Concretely: cover selects a set of canonical steps
-  (a DAG), then reconstructs the printed chains from the DAG.
-- Return value: `lib/fulminate/internal.ml` (`generate_c_specs_internal`,
-  where `abd_push`/`abd_record_args`/`abd_mark_post`/`abd_pop` strings are
-  built) — emit `cn_abd_record_var("return", (uintptr_t)__cn_ret, ...)` into
-  the post-injection (`post_strs`, before `cn_abd_pop_frame`); Fulminate's
-  epilogue already has the return value in scope (see how `exit_strs` are
-  spliced). Runtime and `data_point.ml` need no schema change (`return` is
-  just another var binding, but must be attached to the post environment).
+**Design.**  For predicates with integer iargs, don't enumerate values —
+*search* them in the harness and *fit terms* afterwards.
+- **Enumeration** (`enumerator.ml`): for each predicate with exactly one
+  integer iarg (limit the first cut to one), and each root, emit a candidate
+  whose iarg is a distinguished *hole* — represent as a fresh sym named
+  `"?iarg"` in the `Request.t` (the chain/step machinery is untouched; mark
+  the qualifier as holed in a side table `(q_idx -> hole info)` passed to
+  the codegen, or detect the sym name).
+- **Harness** (`fp_codegen.ml`): for a holed qualifier, wrap the per-dp body
+  in `for (long v = 0; v <= 8; v++) { fp_setup(dp); ... call with
+  convert_to_cn_bits_i32((int32_t)v) ...; on success: emit
+  {"q":k,"dp":j,"iarg":v,"steps":[...]} and break; fp_teardown(); }`; if no
+  `v` succeeds emit null.  (Search bound 8 is a config constant; document.)
+- **Fitting** (`infer.ml`): for a holed candidate with per-dp solutions
+  `v_j`: try terms in order (1) each integer argument `n` with
+  `eval n = v_j` on every dp; (2) `n + c` / `n - c` for `c ∈ {1, 2}`;
+  (3) the constant, if all `v_j` are equal.  First fit wins; instantiate the
+  qualifier (substitute the hole sym via `IT.subst` /
+  `Request.Predicate.subst`) and proceed as a normal candidate with the
+  recorded footprints.  No fit → drop the candidate.
+- Footprints per dp come from the successful runs, so (†) and Cover are
+  unchanged.
 
-**Algorithmic content.** §4.4's dependency-aware Cover. The key data
-structure change is from "set of qualifiers" to "DAG of canonical steps";
-disjoint set cover runs over DAG nodes, which resolves the duplicated-prefix
-problem (`take X = RW<struct node>(node)` shared by two dependent takes)
-without weakening disjointness.
+**Acceptance.**  Two flips; `SizedList`'s `assert (0i32 < n)` and NULL base
+case are exercised by the search (v=0 fails on non-null, correct v
+succeeds) — which is exactly the take-semantics validation doing the
+filtering.  Guard the cost: holed candidates multiply harness work by the
+search bound; only predicates that *have* integer iargs pay.
 
-**Tests to add / update.**
-- Update `baseline_wrapper_lists.c`: flips from `/* inference failed */` to a
-  chain expectation
-  (`take W = RW<struct wrapper>(w);` + `take _ = IntList(W.head);` +
-  `take _ = IntList(W.tail);` — exact printed names normalised by the test to
-  avoid symbol-number noise; extend `run-bi-abd.sh` matching if needed).
-- Update `step2_partial_spec_no_overlap.c`: now expects
-  `take _ = IntList(??.next)`-style completion instead of failure — i.e. the
-  partial-spec case becomes a *positive* test.
-- New `step3_return_list.c`: constructor function building and returning a
-  fresh list; expect `ensures`-side `IntList(return)` (this also exercises the
-  leak-check → post pipeline on heap the caller never passed in).
-- Failure case `step3_chain_depth_limit.c`: nesting deeper than
-  `max_chain_depth` — expect honest `inference failed` plus a debug note, not
-  a blow-up.
+**Risks.**  Two-int-iarg predicates (unsupported: emit no holed candidate —
+honest failure); holes in chain leaves (allowed by construction, but test
+coverage is via the flat cases first).
 
-**Success criteria.** Wrapper and constructor tests green; enumeration stays
-bounded (assert candidate-count in a unit test with a many-field struct).
+### WI-7: Iterated resources (`each`) for arrays
 
-**Risks / dependencies / limitations.**
-- Candidate growth is multiplicative in chain depth; the round-based
-  enumeration *only from surviving candidates* (those with `F ≠ ⊥` and
-  `F ∩ A ≠ ∅`) is the containment mechanism — this is where Step 4's guided
-  enumeration will eventually take over.
-- Printing chains requires stable, readable bound names (`W`, `L1`…); keep a
-  per-function counter, and alpha-equivalence in `Qualifier.equal` to avoid
-  duplicate suggestions.
-- The `return` hook is the one codegen touch; it reuses the existing bi-abd
-  injection point in `internal.ml` and is a no-op without `~bi_abductive`.
+**Flips:** `example_hard_array_fill`:
+`each (u64 i; 0u64 <= i && i < 8u64) { RW<signed int>(array_shift<signed int>(a, i)) }`
+— or with the bound `n`: generalising the bound to the argument requires the
+multi-dp fit (same machinery as WI-6): with one call, the constant bound is
+what (†) supports; **extend the test with a second call `array_fill(buf2, 4)`**
+so the fitted bound must be `(u64)n` — then expect
+`each (u64 i; 0u64 <= i && i < (u64)n) { ... }`.  Capture the exact
+`Request.pp` rendering of the `Q` request for the expectation.
 
----
+**Design.**
+- **Detection** (`enumerator.ml` or a small new module `each_detect.ml`):
+  per pointer arg `a` with element type `T` (`s = size_of T`), per dp: find
+  the maximal `lo ≤ i < hi` with `[addr(a)+lo*s, addr(a)+hi*s) ⊆ A_j` and
+  the run non-empty.  Candidate bounds: fit `lo` and `hi` across dps with
+  the WI-6 term grammar (constants; int args; arg±1).  Emit a
+  `Request.Q` candidate:
+  `{ name = Owned (T, Init); pointer = arg term; q = (i_sym, BT.Bits (Unsigned, 64));
+     q_loc = loc; step = Sctypes.to_ctype T; permission = lo ≤ i && i < hi; iargs = [] }`
+  (see `Request.QPredicate` in `lib/request.ml:73` for the exact record; the
+  `step` field is a `Sctypes.ctype`).
+- **Footprint**: analytic (`footprint.ml`): evaluate `lo`/`hi` per dp
+  (constants or args from `pre_vars`), footprint =
+  `⋃_{i∈[lo,hi)} [addr + i*s, addr + (i+1)*s)`; ⊥ if the base is NULL or
+  bounds are unevaluable/negative.  (No harness involvement in the first
+  cut; `Request.Q` remains un-rendered there — `needs_harness` must return
+  `false` for these.)
+- **Printing**: `Request.pp` handles `Q` already; check the suggestion reads
+  as valid CN (`each (u64 i; ...) { ... }`) and adjust `pp_takes` framing if
+  needed.
 
-### Step 4 — Guided enumeration (memory graph + traversal summaries) and ranking
+**Acceptance.**  `array_fill` flips; `adversarial_array_two_cells` must
+*still* produce the two individual cells, not a 2-element `each` — tie/order:
+enumerate `each` candidates *after* flat and chain candidates, and only emit
+them when the run length is ≥ 3 (a documented heuristic constant), so small
+fixed blocks keep their exact per-cell form.
 
-**Feature summary.** Replace naive predicate-instance enumeration with the
-§4.5 heuristic: anchors = explainable values; traversal summaries extracted
-from predicate definitions; propose only instances whose summary-directed walk
-on the concrete memory graph connects an anchor to the missing region; recover
-boundary iargs from where the walk stops. Add a small ranking pass.
+**Risks.**  `Request.Q`'s permission term construction (use `IT.le_`/`IT.lt_`
+over the right bit-vector type; match on how CN parses `each` specs by
+round-tripping one through `cn verify` manually).
 
-**Relevant files / modules / functions.**
-- New: `lib/bi_abduction/traversal.ml` — extract, per
-  `Definition.Predicate.t`, a summary
-  `{ root_cell : Sctypes.t option; next_offsets : int list; stop_iargs : (int (* iarg index *) * stop_role) list }`
-  by walking each `Clause.t`'s `packing_ft`: find the `Resource` whose pointer
-  is the predicate's own `pointer` sym (root cell type); find recursive
-  `Resource`s naming the same predicate and pattern-match their pointer terms
-  as `StructMember`/`MemberShift` of the root binding (traversal offsets);
-  match guards of non-recursive clauses of the shape `pointer == t` where `t`
-  is an iarg or `NULL` (stop condition → which iarg is the boundary).
-  Unrecognised shapes degrade to "no summary" ⇒ fall back to Step-3
-  enumeration for that predicate.
-- `lib/bi_abduction/enumerator.ml`: rewrite `predicate_qualifiers` to:
-  1. compute the explainable-anchor set: evaluate each pool term (args, chain
-     fields, `return`) to a concrete address;
-  2. for each predicate with a summary and each anchor whose pointee type
-     matches `root_cell`: walk `Memory_graph.t` (`adj` with `Offset`/`Deref`
-     edges) following `next_offsets` from the anchor; require the walk to
-     touch `A`;
-  3. the address where the walk first leaves the region it may own (reaches
-     `already_owned`, leaves the dump, or hits NULL) is the *boundary value*;
-     instantiate the stop iarg with an explainable term evaluating to that
-     value (`NULL`, an argument like `end`); if no term explains it, drop the
-     candidate (deferred: derived iargs);
-  4. remaining iargs still come from `choices_for_bt`, but only for predicates
-     whose summary left them unconstrained.
-  Keep the naive path behind `config.naive_enumeration : bool` for
-  differential testing.
-- `lib/bi_abduction/memory_graph.ml`: minor extension — record *which* struct
-  layout produced each `Offset` edge so the walk can be typed (today every
-  layout is overlaid on every node), and expose
-  `walk : t -> start:int64 -> offsets:int list -> stop:(int64 -> bool) -> int64 list`.
-- New: `lib/bi_abduction/rank.ml` — order multiple valid covers / equal-
-  footprint candidates: fewer qualifiers ≺ more; named predicate ≺ `RW` chain
-  at equal footprint; smaller `Σ|F \ A|` first (from Step 2). `infer.ml`
-  runs cover on the ranked candidate order and reports the best cover.
+### WI-8: Allocation tracking (malloc/free) — requires WI-4
 
-**Algorithmic content.** §4.5's anchor/traversal heuristic; candidate
-generation becomes O(anchors × predicates × walk length) instead of
-O(args^iargs × predicates). Ranking implements a minimal §5.
+**Flips:** `example_hard_malloc_constructor`: pre — *no additions* (the
+fresh cell must drop out of the anti-frame per the closed form
+`A* = (T \ N) \ Own`); post — `take _ = RW<struct node>(return);`
+(ties with `IntList(return)` on a single node; owned-before-predicates flat
+order keeps `RW` — either is correct; pin whichever is produced).
 
-**Tests to add / update.**
-- Update `extra_nonrecursive_predicate_ignored.c`: flips to expect
-  `take _ = PairCell(p);` (ranking prefers the named predicate at equal
-  footprint).
-- New `step4_two_traversals.c`: struct with `next` and `prev`, predicates
-  `FwdList` (follows `next`) and `BwdList` (follows `prev`), heap linked only
-  forward — must pick `FwdList` (today both look identical to reachability).
-- New `step4_enumeration_scale.c`: predicate with 3 pointer iargs and a
-  function with 6 pointer args; assert (via candidate-count debug output or a
-  timeout budget in `run-bi-abd.sh`) that guided enumeration stays small
-  where the naive product explodes.
-- Failure case `step4_unexplainable_boundary.c`: list segment whose boundary
-  address corresponds to no in-scope term — expect no segment suggestion and
-  honest failure (this is the doorway to deferred derived-iarg work).
+**Design.**
+- **Interposition**: in `lib/fulminate/fulminate.ml`, where the bi-abductive
+  prelude is emitted (`#include <cn-executable/bi_abduction.h>`), also emit
+  `#define malloc(sz) cn_abd_malloc(sz)` and
+  `#define free(p) cn_abd_free(p)` (behind `bi_abductive`; the defines are
+  inert for declarations and correct for calls in the single translation
+  unit Fulminate instruments).
+- **Runtime** (`bi_abduction.c` + header):
+  - `void *cn_abd_malloc(size_t sz)`: call libc malloc, and (B-New) map the
+    range in the ghost state at the *current* depth
+    (`ownership_ghost_state_set(ptr, sz, get_cn_stack_depth(), NULL)`) so
+    subsequent accesses are owned (no events → excluded from `A`).  Record
+    the range in the current frame (an `allocs` table) for diagnostics.
+  - `void cn_abd_free(void *p)`: look up the allocation size (keep a global
+    table `ptr -> size` filled by `cn_abd_malloc`), remove the range from
+    the ghost state (`ownership_ghost_state_remove`) so it neither leaks nor
+    re-abduces (B-Free), then call libc free.
+  - Λ at return then naturally contains still-owned fresh cells (they are at
+    the callee's depth) → released to the caller and covered by
+    return-anchored post candidates (WI-4).
+- No OCaml-side changes beyond expectations.
 
-**Success criteria.** All earlier tests green; scale test within budget;
-`FwdList`/`BwdList` disambiguation correct.
+**Acceptance.**  `mk_node` flips with an *empty pre* (this is the paper's
+`N_i` subtraction observable end-to-end); heap dumps around the leaked
+malloc'd cell already happen (leak-time dumps), so the post harness can
+evaluate `RW<struct node>(return)`.
 
-**Risks / dependencies / limitations.**
-- Traversal-summary extraction is pattern-matching over `IndexTerms` shapes
-  and will not recognise every predicate style (multi-cell nodes, boolean
-  flag guards). The fallback to Step-3 enumeration keeps this safe: guided
-  enumeration must only ever *shrink* the candidate set on predicates it
-  understands.
-- Depends on Steps 1–3 (semantic `F` validates what the heuristic proposes;
-  chains supply the anchor pool).
+**Risks.**  The `#define` approach only covers the instrumented TU (fine —
+that is Fulminate's scope) and standard names (`malloc`/`calloc`/`free`;
+add `calloc` if a test needs it).  `cn_stack_depth` visibility in
+`bi_abduction.c`: use `get_cn_stack_depth()` as elsewhere.
 
----
+## 5. Explicitly deferred (unchanged rationale)
 
-### Step 5 — Iterated resources (`each`) for arrays
+- **Loop invariants** (per-iteration data points; symbolic relation to the
+  loop counter) — separate research track.
+- **Interprocedural spec reuse** (consuming inferred callee specs during the
+  caller's inference; over-approximation propagation across activations —
+  `sec-inference.tex`'s open problem, visible today in
+  `example_list_append`'s shape-specific post).
+- **Guided enumeration / ranking beyond tie-breaks** (traversal summaries,
+  memory-graph anchors — original Step 4): re-evaluate after WI-2/WI-6 land;
+  candidate counts in commit messages are the tripwire.
+- **Deeper derived terms** (arbitrary arithmetic, unexplainable pointer
+  boundaries with heap-allocated targets): WI-6's grammar is deliberately
+  {args, args±1..2, constants}.
+- **Provenance-aware addresses** (`Prop. parametricity` in the paper): the
+  runtime collapses to `uintptr_t`; fine for the concrete tool.
 
-**Feature summary.** Suggest
-`each (u64 i; lo <= i && i < hi) { RW<T>(array_shift<T>(p, i)) }` when the
-missing region is a contiguous, regularly-strided block anchored at an
-explainable pointer, with `lo`/`hi` restricted to explainable terms
-(constants like `0`, integer arguments like `n`).
+## 6. Workflow (how to land each WI)
 
-**Relevant files / modules / functions.**
-- `lib/bi_abduction/enumerator.ml`: array-candidate detection — for each
-  pointer anchor `p` with pointee type `T` (`sizeof T = s`), find the maximal
-  run `[p + lo*s, p + hi*s)` inside `A_j`; propose bounds only when `lo` and
-  `hi` are explainable in `V_j` **for every data point** (typically `lo = 0`,
-  `hi = n` for an `int n` argument — two runs with different `n` disambiguate
-  `n` from a constant).
-- `lib/bi_abduction/qualifier.ml` / `concrete_eval.ml`: represent the
-  candidate as `Request.Q { name = Owned (ct,Init); pointer; q = (i, u64);
-  permission = lo <= i && i < hi; step; ... }`; evaluation iterates `i` over
-  the concrete bound values, consuming `[p + i*s, p + (i+1)*s)` per index —
-  this finally makes `Request.Q` a first-class citizen of `F(q,d)`.
-- `lib/bi_abduction/footprint.ml`, `cover.ml`: no structural change —
-  `Request.Q` footprints flow through the same per-data-point sets.
-- `lib/fulminate` / runtime: none.
+```
+# build              dune build bin/main.exe runtime/libcn/lib @install
+# full suite         tests/run-bi-abd.sh          (uses _build/install runtime)
+# one test           tests/run-bi-abd.sh <name>.c
+# inspect a run      cd $(mktemp -d) && CN_RUNTIME_PREFIX=$REPO/_build/install/default/lib/cn/runtime \
+#                      $REPO/_build/default/bin/main.exe bi-abd <file> [-p 3..5]
+# artifacts          cn_abd_summary.json, cn_abd_heap.jsonl, bi_abd_fp_<fn>_<phase>.c in the temp dir
+# format             dune fmt && dune build @fmt
+```
 
-**Algorithmic content.** Extends the qualifier grammar to the `each` form of
-IDEA.md §4.1 (`each(u64 i; t1 <= i && i < t2) { RW<ty>(p+i) }`); bound
-selection is the same explainability discipline as Step 4's boundary iargs;
-multi-data-point filtering (Step 2) is what pins bounds to `n` rather than to
-the concrete length of one run.
-
-**Tests to add / update.**
-- New `step5_array_fill.c`: `void fill(int *p, int n)` writing `p[0..n)`,
-  called with two different `n` — expect the `each` qualifier with bound `n`.
-- New `step5_array_suffix.c`: function touching `p[1..n)` — expect
-  `lo = 1` (constant lower bound).
-- Failure cases: `step5_strided_gap.c` (touches every other element — no
-  contiguous run ⇒ no `each`; falls back to failure or individual `RW`s) and
-  `step5_unexplainable_bound.c` (length derived arithmetically, e.g. `n*2`,
-  with term synthesis disabled — honest failure; documents the derived-iarg
-  deferral).
-
-**Success criteria.** Array tests green; `each` candidates never suggested
-when a single-cell or predicate candidate covers `A` more tightly (ranking
-from Step 4 applies).
-
-**Risks / dependencies / limitations.**
-- Depends on Step 2 (multi-run bound disambiguation) and Step 4 (ranking).
-- Only unit stride over `sizeof T` and conjunctive `lo <= i < hi` bounds;
-  nested `each`, matrices, and `each` inside predicate bodies remain ⊥.
-
----
-
-## 6. Cross-cutting testing and CI
-
-- `tests/run-bi-abd.sh` is the regression harness; every step lands with its
-  expectation updates in the same commit as the behavior change, so the
-  suite is always green at every commit. New tests follow the
-  `stepN_*.c` naming used above and are appended to the default `tests` array.
-- The suite is not yet wired into GitHub CI (`.github/workflows/` has no
-  bi-abd job). Add a job to `fulminate.yml` (or a new `bi-abd.yml`) that runs
-  `dune build && tests/run-bi-abd.sh` — do this in Step 1 so later steps are
-  guarded.
-- Non-bi-abd suites (`tests/run-cn.sh`, `tests/run-cn-exec.sh`,
-  `tests/run-cn-vip.sh`, testgen suites) must stay green untouched; the only
-  shared surfaces are `utils.c`/`rmap.c` (changes stay behind
-  `cn_abd_is_enabled()`) and `internal.ml` codegen (changes stay behind
-  `~bi_abductive`).
-- `lib/bi_abduction/CLAUDE.md` and `TODO.md` are updated at each step (the
-  pre/post-split section of `TODO.md` is already stale and should be corrected
-  in Step 1's commit).
-
-## 7. Intentionally deferred features
-
-- **Derived integer predicate arguments** (lengths, counts, bounds that equal
-  no in-scope term — e.g. `ListSeg` length iargs, `n*2` array bounds).
-  Requires synthesising arithmetic terms whose value matches an observed
-  concrete number across all data points: a program-synthesis search
-  (IDEA.md compares it to programming-by-examples) with a large, noisy
-  hypothesis space. Every earlier step is designed so that its absence
-  degrades to "candidate dropped / honest failure", never a wrong spec.
-  Revisit after Step 4, where the boundary-value machinery gives natural
-  entry points.
-- **Loop invariants.** Structurally different (per-iteration data points,
-  symbolic relation to the loop counter); IDEA.md itself marks it TODO.
-  Needs a new runtime hook (`cn_abd_loop_iter`) and a generalisation story —
-  a separate project.
-- **malloc/free tracking.** Requires allocation-event interception and
-  ownership-transfer semantics for pre vs post attribution (IDEA.md §3
-  "Malloc/free: TODO"). Constructor-style tests in Step 3 dodge this by
-  relying on the leak check only.
-- **Interprocedural spec propagation** (using an inferred callee spec to
-  refine the caller). The runtime already merges callee missing sets into the
-  caller (the `return` rule), so the data is there, but consuming inferred
-  specs during inference introduces ordering/fixed-point questions —
-  post-Step-4 work.
-- **Symbolic validation / integration with `cn verify`** of suggested specs,
-  and **source rewriting**. Suggestions remain explicitly *candidates*
-  (concrete evidence only); auto-inserting and verifying them is quality-of-
-  life work once precision is trustworthy.
-- **Broader architectural risks flagged, not planned:** whole-heap snapshots
-  or deterministic re-running (IDEA.md thinking log) if the
-  dump-neighborhood scheme proves too lossy; provenance-aware addresses
-  (main.tex notes the core is parametric in address structure — the current
-  runtime collapses to raw `uintptr_t`, which is fine for the concrete tool
-  but would need care for CHERI-style targets).
+- One commit per WI (plus a separate commit if `dune fmt` reflows untouched
+  files).  Commit message: what flipped, why it is sound, candidate-count
+  or runtime observations if relevant.  Trailers as in recent history.
+- Update, in the same commit: `tests/run-bi-abd.sh` expectations (exact
+  observed strings; add `forbidden_for` entries whenever a WI creates a new
+  way to be wrong), the flipped tests' header comments,
+  `lib/bi_abduction/CLAUDE.md` (module map / limitations), and
+  `lib/bi_abduction/TODO.md`.
+- If a WI produces an unexpected *wrong* suggestion on any test, stop and
+  fix the candidate-validation path before adjusting expectations —
+  invariant 2 outranks progress.
