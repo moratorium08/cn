@@ -6,6 +6,8 @@ module CI = Coq_ir
 module CC = Cn_to_coq
 
 let ret_sym = "ν"
+let rec_sym = "rec"
+let call_sym = "call"
 
 (* Printing headers for each module in the Coq file *)
 
@@ -335,9 +337,36 @@ let rec pat_to_coq (pat : CI.coq_pat) =
     parensM (build ([ Sym.pp s ] @ List.map pat_to_coq l))
 
 
+let unpack_sym (CI.Coq_sym sym) = sym
+
+let get_pred_name (pred : CI.coq_resource_pred) = unpack_sym pred.CI.name
+
+let get_constr_name (pred : CI.coq_resource_pred) =
+  "CN_GROUP_" ^ Sym.pp_string (get_pred_name pred)
+
+
+let get_group_type_name index = "cn_predicate_group_" ^ string_of_int index
+
+let make_actual_args (pred : CI.coq_resource_pred) =
+  let open Pp in
+  let ptr = unpack_sym pred.CI.ptr in
+  let args = List.map (fun (arg, _) -> Sym.pp (unpack_sym arg)) pred.CI.args in
+  (Sym.pp ptr :: args) @ [ !^ret_sym ]
+
+
 (* is_clause is true when the translated term is a resource predicate clause,
-    this is because resource predicate clauses use different connectives *)
-let term_to_coq (global : Global.t) (t : CI.coq_term) (is_clause : bool) =
+    this is because resource predicate clauses use different connectives
+    pred_map is used for handling recursive predicate call.
+    If (P, doc) in pred_map, doc will be generated.
+    Otherwise, the standard predicate call (i.e. P(...) ) will be generated.
+    TODO(HK): make it optional.
+*)
+let term_to_coq
+      (pred_map : CI.coq_resource_pred Sym.Map.t)
+      (global : Global.t)
+      (t : CI.coq_term)
+      (is_clause : bool)
+  =
   let open Pp in
   let rec f (global : Global.t) (iris_bool : bool) t =
     let aux t = f global iris_bool t in
@@ -346,6 +375,17 @@ let term_to_coq (global : Global.t) (t : CI.coq_term) (is_clause : bool) =
     let mk_wand doc doc2 = doc ^^^ !^"-∗" ^^^ doc2 in
     let mk_star doc doc2 = doc ^^^ !^"∗" ^^^ doc2 in
     let mk_iris_and doc doc2 = doc ^^^ !^"∧" ^^^ doc2 in
+    (* (λ p ν, rec (CN_GROUP_IsForest p ν)) *)
+    let make_closure (nm : Sym.t) =
+      match Sym.Map.find_opt nm pred_map with
+      | Some pred ->
+        let args = make_actual_args pred in
+        let call = parensM @@ build @@ (!^(get_constr_name pred) :: args) in
+        let binders = build args in
+        let body = parensM @@ build [ !^rec_sym; call ] in
+        parensM @@ (!^"λ" ^^^ binders ^^ comma) ^//^ body
+      | None -> Sym.pp nm
+    in
     match t with
     | CI.Coq_sym_term (CI.Coq_sym s) -> Sym.pp s
     | Coq_const c ->
@@ -520,22 +560,17 @@ let term_to_coq (global : Global.t) (t : CI.coq_term) (is_clause : bool) =
     | CI.Coq_good _ -> rets ""
     | CI.Coq_PName_LAT (CI.Coq_sym nm, CI.Coq_sym pname, bt, t, iargs, ptr) ->
       let args = List.map aux iargs in
+      let pred = make_closure pname in
+      let body = build ((pred :: aux ptr :: args) @ [ Sym.pp nm ]) in
       if is_clause then
-        mk_star
-          (pp_iris_exists
-             nm
-             bt
-             (build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])))
-          (aux t)
+        mk_star (pp_iris_exists nm bt body) (aux t)
       else
-        mk_wand
-          (pp_forall nm bt (build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])))
-          (aux t)
+        mk_wand (pp_forall nm bt body) (aux t)
     | CI.Coq_PName_LRT (CI.Coq_sym nm, CI.Coq_sym pname, bt, t, iargs, ptr) ->
       let args = List.map aux iargs in
-      mk_star
-        (pp_iris_exists nm bt (build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])))
-        (aux t)
+      let pred = make_closure pname in
+      let body = build ((pred :: aux ptr :: args) @ [ Sym.pp nm ]) in
+      mk_star (pp_iris_exists nm bt body) (aux t)
     | CI.Coq_pure t -> (match t with CI.Coq_good _ -> rets "" | _ -> iris_pure (aux t))
     | CI.Coq_Each_LAT (Coq_sym nm, Coq_sym _, _, ptr, _, perm, pred) ->
       (match perm with
@@ -587,9 +622,10 @@ let term_to_coq (global : Global.t) (t : CI.coq_term) (is_clause : bool) =
 
 
 let convert_lemma_defs global (lemmas : CI.coq_lemma list) =
+  let map = Sym.Map.empty in
   let lemma_ty (CI.Coq_lemma (CI.Coq_sym nm, tm)) =
     Pp.progress_simple "converting lemma type" (Sym.pp_string nm);
-    let rhs = term_to_coq global tm false in
+    let rhs = term_to_coq map global tm false in
     defn (Sym.pp_string nm ^ "_type") [] (Some (Pp.string "iProp Σ")) rhs false
   in
   let tys = List.map lemma_ty lemmas in
@@ -640,7 +676,10 @@ let make_pred_ty args ret_ty res_ty =
 (* print resource predicate definitions *)
 let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
   let open Pp in
-  let unpack_clauses (clauses : CI.coq_clause list) =
+  let unpack_clauses
+        (pred_map : CI.coq_resource_pred Sym.Map.t)
+        (clauses : CI.coq_clause list)
+    =
     let clause_to_coq (clause : CI.coq_clause) =
       match clause with
       | CI.Coq_clause (guard, body) ->
@@ -648,16 +687,17 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
         let guard_doc =
           match guard with
           | x :: xs ->
-            iris_pure (term_to_coq gl x false)
+            iris_pure (term_to_coq pred_map gl x false)
             ^^ intersperse
                  ""
                  ""
                  (List.map
-                    (fun y -> !^" ∧ " ^^ iris_pure (!^"~" ^^ term_to_coq gl y false))
+                    (fun y ->
+                       !^" ∧ " ^^ iris_pure (!^"~" ^^ term_to_coq pred_map gl y false))
                     xs)
           | [] -> rets "True"
         in
-        let body_doc = term_to_coq gl body true in
+        let body_doc = term_to_coq pred_map gl body true in
         parensM (build [ guard_doc; rets " ∧ "; body_doc ])
     in
     (* add all previous guards to the beginnig of each clause *)
@@ -672,42 +712,15 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
   let make_one_arg = function
     | CI.Coq_sym id, bt -> parens (typ (Sym.pp id) (bt_to_coq bt))
   in
-  let unpack_sym (CI.Coq_sym sym) = sym in
-  let get_pred_name (pred : CI.coq_resource_pred) = unpack_sym pred.CI.name in
   let make_formal_args (pred : CI.coq_resource_pred) =
     let ptr = unpack_sym pred.CI.ptr in
     let ptr_arg = parens (typ (Sym.pp ptr) (bt_to_coq CI.Coq_Loc)) in
     let ret_arg = parens (typ !^ret_sym (bt_to_coq pred.CI.ret_bt)) in
     (ptr_arg :: List.map make_one_arg pred.CI.args) @ [ ret_arg ]
   in
-  let make_actual_args (pred : CI.coq_resource_pred) =
-    let ptr = unpack_sym pred.CI.ptr in
-    let args = List.map (fun (arg, _) -> Sym.pp (unpack_sym arg)) pred.CI.args in
-    (Sym.pp ptr :: args) @ [ !^ret_sym ]
-  in
-  let make_args (group : CI.coq_resource_pred_group) (pred : CI.coq_resource_pred) =
-    let make_rec_arg (arg : CI.coq_resource_pred) =
-      let ty = make_pred_ty arg.args arg.ret_bt "iProp Σ" in
-      parens (typ (Sym.pp (get_pred_name arg)) ty)
-    in
-    let rec_args = List.map make_rec_arg group in
-    rec_args @ make_formal_args pred
-  in
   let get_body_name (pred : CI.coq_resource_pred) =
     Sym.pp_string (get_pred_name pred) ^ "_body"
   in
-  let unpack_body (group : CI.coq_resource_pred_group) (pred : CI.coq_resource_pred) =
-    defn
-      (get_body_name pred)
-      (make_args group pred)
-      (Some (Pp.string "iProp Σ"))
-      (intersperse " ∨ " "" (unpack_clauses pred.CI.clauses))
-      false
-  in
-  let get_constr_name (pred : CI.coq_resource_pred) =
-    "CN_GROUP_" ^ Sym.pp_string (get_pred_name pred)
-  in
-  let get_group_type_name index = "cn_predicate_group_" ^ string_of_int index in
   let make_constr type_name pred =
     let constr_name = get_constr_name pred in
     typ (Pp.string constr_name) (make_pred_ty pred.args pred.ret_bt type_name)
@@ -728,32 +741,23 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
     in
     group_type ^^ ofe_type
   in
-  (* (λ p ν, rec (CN_GROUP_IsForest p ν)) *)
-  let make_closure (pred : CI.coq_resource_pred) =
+  let make_case (pred_map : CI.coq_resource_pred Sym.Map.t) (pred : CI.coq_resource_pred) =
     let args = make_actual_args pred in
-    let call = parensM @@ build @@ (!^(get_constr_name pred) :: args) in
-    let binders = build args in
-    let body = parensM @@ build [ !^"rec"; call ] in
-    parensM @@ (!^"λ" ^^^ binders ^^ comma) ^//^ body
-  in
-  (* CN_GROUP_IsForest p ν =>
-      IsForest_body
-        (λ p ν, (rec (CN_GROUP_IsForest p ν)))
-        (λ p ν, (rec (CN_GROUP_IsTree p ν)))
-        p ν *)
-  let make_case predicates (pred : CI.coq_resource_pred) =
-    let body_name = !^(get_body_name pred) in
-    let args = make_actual_args pred in
-    let closures = List.map make_closure predicates in
-    let body = build @@ (body_name :: closures) @ args in
+    let body = parens (intersperse " ∨ " "" (unpack_clauses pred_map pred.CI.clauses)) in
     let pattern = build @@ (!^(get_constr_name pred) :: args) in
     infix 2 1 !^"=>" pattern body
   in
   let get_pre_fixpoint_name index = "cn_predicate_group_pre_" ^ string_of_int index in
   let make_pre_fixpoint_body (predicates : CI.coq_resource_pred_group) =
+    let pred_map =
+      List.fold_left
+        (fun acc pred -> Sym.Map.add (get_pred_name pred) pred acc)
+        Sym.Map.empty
+        predicates
+    in
     let cases =
       predicates
-      |> List.map (make_case predicates)
+      |> List.map (make_case pred_map)
       |> List.map (fun case -> !^"| " ^^ case)
       |> flow hardline
     in
@@ -762,8 +766,8 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
   let make_pre_fixpoint_definition index (predicates : CI.coq_resource_pred_group) =
     let group_ofe_name = get_group_type_name index ^ "O" in
     let rec_type = flow !^" -> " [ !^group_ofe_name; !^"iProp Σ" ] in
-    let rec_arg = parens @@ typ !^"rec" rec_type in
-    let call_arg = parens @@ typ !^"call" !^group_ofe_name in
+    let rec_arg = parens @@ typ !^rec_sym rec_type in
+    let call_arg = parens @@ typ !^call_sym !^group_ofe_name in
     defn
       (get_pre_fixpoint_name index)
       [ rec_arg; call_arg ]
@@ -991,11 +995,10 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
   in
   let unpack_group index (predicates : CI.coq_resource_pred_group) =
     let group_type = make_group_type index predicates in
-    let pred_defs = List.map (unpack_body predicates) predicates in
     let fixpoint = make_fixpoints index predicates in
     let induction_lemma = make_induction_lemma index predicates in
     let unfold_lemmata = List.map (make_unfold_lemma index predicates) predicates in
-    (group_type, pred_defs @ (fixpoint :: induction_lemma :: unfold_lemmata))
+    (group_type, fixpoint :: induction_lemma :: unfold_lemmata)
   in
   let groups = List.mapi unpack_group preds in
   (List.map fst groups, List.concat_map snd groups)
@@ -1011,12 +1014,13 @@ let translate_uninterp_pred =
 (* translate functions to Coq *)
 let translate_fun (gl : Global.t) (funs : CI.coq_fun list list * CI.coq_fun list list) =
   let open Pp in
+  let pred_map = Sym.Map.empty in
   let translate_one cf =
     match cf with
     | CI.Coq_fun_def (CI.Coq_sym nm, logical_fun, args, _) ->
       (match logical_fun with
        | CI.Coq_def body ->
-         let coq_body = term_to_coq gl body false in
+         let coq_body = term_to_coq pred_map gl body false in
          let coq_args =
            List.map
              (fun (CI.Coq_sym arg, bt) ->
@@ -1026,7 +1030,7 @@ let translate_fun (gl : Global.t) (funs : CI.coq_fun list list * CI.coq_fun list
          in
          defn (Sym.pp_string nm) coq_args None coq_body false
        | CI.Coq_recdef body ->
-         let coq_body = term_to_coq gl body false in
+         let coq_body = term_to_coq pred_map gl body false in
          let coq_args =
            List.map
              (fun (CI.Coq_sym arg, bt) ->
