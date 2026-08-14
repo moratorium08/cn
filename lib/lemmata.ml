@@ -6,8 +6,8 @@ module CI = Coq_ir
 module CC = Cn_to_coq
 
 let ret_sym = "ν"
-let rec_sym = "rec"
-let call_sym = "call"
+let rec_sym = "ψ"
+let call_sym = "ξ"
 
 (* Printing headers for each module in the Coq file *)
 
@@ -718,9 +718,6 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
     let ret_arg = parens (typ !^ret_sym (bt_to_coq pred.CI.ret_bt)) in
     (ptr_arg :: List.map make_one_arg pred.CI.args) @ [ ret_arg ]
   in
-  let get_body_name (pred : CI.coq_resource_pred) =
-    Sym.pp_string (get_pred_name pred) ^ "_body"
-  in
   let make_constr type_name pred =
     let constr_name = get_constr_name pred in
     typ (Pp.string constr_name) (make_pred_ty pred.args pred.ret_bt type_name)
@@ -775,7 +772,7 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
       (make_pre_fixpoint_body predicates)
       false
   in
-  let make_monotonicity_instance index (predicates : CI.coq_resource_pred_group) =
+  let make_monotonicity_instance index =
     let pre_fixpoint = get_pre_fixpoint_name index in
     let instance_name = get_group_type_name index ^ "_mono" in
     let instance =
@@ -788,21 +785,7 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
               (!^"Local Instance" ^^^ !^instance_name)
               (!^"BiMonoPred" ^^^ !^pre_fixpoint ^^ dot))
     in
-    let prepare =
-      !^"ltac:"
-      ^^ parens
-           (build
-              [ !^"unfold";
-                intersperse "," "" @@ List.map (fun p -> !^(get_body_name p)) predicates
-              ])
-    in
-    let tactic =
-      prefix
-        2
-        1
-        (group (!^"solve_bi_mono_pred_with_prepare" ^/^ !^pre_fixpoint))
-        (prepare ^^ dot)
-    in
+    let tactic = build [ !^"solve_bi_mono_pred"; !^pre_fixpoint ] ^^ dot in
     let proof =
       blank 2 ^^ align (!^"Proof." ^^ nest 2 (hardline ^^ tactic) ^^ hardline ^^ !^"Qed.")
     in
@@ -810,7 +793,7 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
   in
   let make_pre_fixpoint index (predicates : CI.coq_resource_pred_group) =
     let definition = make_pre_fixpoint_definition index predicates in
-    let mono = make_monotonicity_instance index predicates in
+    let mono = make_monotonicity_instance index in
     definition ^^ mono
   in
   let make_fixpoint index (pred : CI.coq_resource_pred) =
@@ -869,9 +852,6 @@ let translate_pred (gl : Global.t) (preds : CI.coq_resource_pred_group list) =
     let make_assumption predicates (pred : CI.coq_resource_pred) =
       (* □ (∀ (p : Ptr) (ν : forest), IsForest_body Φ_IsForest Φ_IsTree p ν -∗ Φ_IsForest p ν) -∗ *)
       let vars = get_pred_vars pred in
-      let extended_vars =
-        List.map (fun p -> !^(get_pred_prop_name p)) predicates @ List.map fst vars
-      in
       let body1 = parensM @@ build @@ (!^(get_body_name pred) :: extended_vars) in
       let body2 =
         parensM @@ build @@ (!^(get_pred_prop_name pred) :: List.map fst vars)
