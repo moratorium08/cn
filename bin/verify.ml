@@ -2,6 +2,35 @@ module CF = Cerb_frontend
 module CB = Cerb_backend
 open Cn
 
+let report_quiet_json ({ TypeErrors.loc; msg } : TypeErrors.t) =
+  let truncate str =
+    let max_length = 4096 in
+    if String.length str <= max_length then
+      str
+    else
+      let half_length = max_length / 2 in
+      String.sub str 0 half_length
+      ^ "\n... <constraint truncated> ...\n"
+      ^ String.sub str (String.length str - half_length) half_length
+  in
+  let short, descr =
+    match msg with
+    | TypeErrors.Unproven_constraint { constr; _ } ->
+      ( "Unprovable constraint",
+        `String (truncate (Pp.plain (LogicalConstraints.pp constr))) )
+    | _ -> ("Verification error", `Null)
+  in
+  let json =
+    `Assoc
+      [ ("loc", (Cerb_location.to_json loc :> Yojson.t));
+        ("short", `String short);
+        ("descr", descr);
+        ("state", `Null);
+        ("report", `Null)
+      ]
+  in
+  Yojson.to_channel ~std:true stderr json
+
 let verify
       filename
       cc
@@ -104,7 +133,9 @@ let verify
             check_consistency
             (global_var_constraints, functions)
         in
-        if not quiet then
+        if quiet && json then
+          List.iter (fun (_fn, err) -> report_quiet_json err) errors
+        else if not quiet then
           List.iter
             (fun (fn, err) ->
                Common.report_type_error
