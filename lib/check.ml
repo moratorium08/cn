@@ -3038,15 +3038,12 @@ let add_stdlib_spec =
     List.fold_left
       (fun map (name, ft) -> StrMap.add name ft map)
       StrMap.empty
-      (if !cnBV then
-         [ ("ctz_proxy", ctz_proxy_ft);
-           ("ffs_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Int_);
-           ("ffsl_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Long);
-           ("ffsll_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.LongLong);
-           ("memcpy_proxy", memcpy_proxy_ft)
-         ]
-       else
-         [])
+      [ ("ctz_proxy", ctz_proxy_ft);
+        ("ffs_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Int_);
+        ("ffsl_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Long);
+        ("ffsll_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.LongLong);
+        ("memcpy_proxy", memcpy_proxy_ft)
+      ]
   in
   let add ct fsym ft =
     Pp.debug
