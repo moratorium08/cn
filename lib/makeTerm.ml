@@ -438,6 +438,11 @@ let value_check_pointer mode ~pointee_ct about loc =
       []
     else
       let addr = addr_ about loc in
+      let object_nonnull =
+        match mode with
+        | `Good -> [ lt_ (z_ Z.zero loc, addr) loc ]
+        | `Representable -> []
+      in
       let last_byte_bound =
         match (mode, pointee_ct) with
         | `Representable, _ -> []
@@ -449,7 +454,7 @@ let value_check_pointer mode ~pointee_ct about loc =
               loc
           ]
       in
-      in_z_range addr (Z.zero, Memory.max_pointer) loc :: last_byte_bound
+      in_z_range addr (Z.zero, Memory.max_pointer) loc :: object_nonnull @ last_byte_bound
   in
   and_
     (List.concat
