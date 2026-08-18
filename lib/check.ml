@@ -1505,6 +1505,14 @@ let bytes_constraints
   =
   (* FIXME this hard codes big endianness but this should be switchable *)
   let here = Locations.other __LOC__ in
+  let byte_is_valid byte =
+    let is_some = isSome_ byte here in
+    if !cnBV then
+      is_some
+    else
+      let value = cast_ BT.Integer (getOpt_ byte here) here in
+      and2_ (is_some, MT.in_z_range value (Z.zero, Z.of_int 255) here) here
+  in
   match ct with
   | Sctypes.Void | Array (_, _) | Struct _ | Function (_, _, _) | Byte ->
     fail (fun _ -> { loc; msg = Unsupported_byte_conv_ct ct })
@@ -1516,7 +1524,7 @@ let bytes_constraints
         let index = int_lit_ i WellTyped.default_quantifier_bt here in
         map_get_ byte_arr index here)
     in
-    let all_some = and_ (List.map (fun byte -> isSome_ byte here) bytes) here in
+    let valid_bytes = and_ (List.map byte_is_valid bytes) here in
     let rhs =
       let shifted =
         List.mapi
@@ -1532,9 +1540,9 @@ let bytes_constraints
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
     in
     (match to_from with
-     | To -> return (and2_ (all_some, eq_ (lhs, rhs) here) here)
+     | To -> return (and2_ (valid_bytes, eq_ (lhs, rhs) here) here)
      | From ->
-       let lc = LC.T all_some in
+       let lc = LC.T valid_bytes in
        let@ provable = provable loc in
        (match provable lc with
         | `True -> return (eq_ (lhs, rhs) here)
@@ -1565,13 +1573,13 @@ let bytes_constraints
       in
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
     in
-    let all_some = and_ (List.map (fun byte -> isSome_ byte here) bytes) here in
+    let valid_bytes = and_ (List.map byte_is_valid bytes) here in
     let bytes_prov =
       List.map (fun byte -> cast_ (BT.Option Alloc_id) (getOpt_ byte here) here) bytes
     in
     (match to_from with
      | From ->
-       let lc = LC.T all_some in
+       let lc = LC.T valid_bytes in
        let@ provable = provable loc in
        (match provable lc with
         | `False ->
@@ -1634,7 +1642,8 @@ let bytes_constraints
               bytes_prov)
            here
        in
-       return (and_ [ all_some; bytes_prov_eq; eq_ (value_addr, bytes_addr) here ] here))
+       return
+         (and_ [ valid_bytes; bytes_prov_eq; eq_ (value_addr, bytes_addr) here ] here))
 
 
 let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
