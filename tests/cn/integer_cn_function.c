@@ -20,7 +20,9 @@ static unsigned long constant_shift(void)
 }
 
 int use_integer_cn_functions(void)
-/*@ ensures return == 4098; @*/
+/*@ requires constant_shift_cn() == 4096;
+    ensures return == 4098;
+@*/
 {
   return add_one(1) + (int)constant_shift();
 }
