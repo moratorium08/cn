@@ -647,6 +647,102 @@ let bv_ctz result_w =
   count
 
 
+(* Exact, bitvector-free interpretations of the integer operations which are
+   outside linear integer arithmetic.  C integer values are constrained by
+   their source types; 128 is the largest integer width accepted by CN. *)
+module CN_Integer_Exact = struct
+  let max_width = 128
+
+  let pow2_name = "cn_integer_pow2"
+
+  let bw_and_name = "cn_integer_bw_and"
+
+  let bw_or_name = "cn_integer_bw_or"
+
+  let bw_xor_name = "cn_integer_bw_xor"
+
+  let int_z = SMT.int_zk
+
+  let two_to i = Z.shift_left Z.one i
+
+  let pow2_body () =
+    let exponent = SMT.atom "exponent" in
+    let cases = List.init max_width (fun i -> (Z.of_int i, two_to i)) in
+    List.fold_right
+      (fun (i, result) otherwise ->
+         SMT.ite (SMT.eq exponent (int_z i)) (int_z result) otherwise)
+      cases
+      (int_z Z.zero)
+
+
+  type bitwise_op =
+    | And
+    | Or
+    | Xor
+
+  let bit_at value i =
+    SMT.num_mod (SMT.num_div value (int_z (two_to i))) (int_z (Z.of_int 2))
+
+
+  let bit_is_set value i = SMT.eq (bit_at value i) (int_z Z.one)
+
+  let bitwise_body op =
+    let x = SMT.atom "x" in
+    let y = SMT.atom "y" in
+    let contribution i =
+      let x_set = bit_is_set x i in
+      let y_set = bit_is_set y i in
+      let result_set =
+        match op with
+        | And -> SMT.bool_and x_set y_set
+        | Or -> SMT.bool_or x_set y_set
+        | Xor -> SMT.bool_xor x_set y_set
+      in
+      SMT.ite result_set (int_z (two_to i)) (int_z Z.zero)
+    in
+    let residue =
+      List.init max_width contribution |> List.fold_left SMT.num_add (int_z Z.zero)
+    in
+    (* Above the largest C integer bit, negative mathematical integers have an
+       infinite run of one bits.  This condition recovers that sign extension
+       without losing large unsigned values. *)
+    let x_negative = SMT.num_lt x (int_z Z.zero) in
+    let y_negative = SMT.num_lt y (int_z Z.zero) in
+    let result_negative =
+      match op with
+      | And -> SMT.bool_and x_negative y_negative
+      | Or -> SMT.bool_or x_negative y_negative
+      | Xor -> SMT.bool_xor x_negative y_negative
+    in
+    SMT.ite
+      result_negative
+      (SMT.num_sub residue (int_z (two_to max_width)))
+      residue
+
+
+  let declare s =
+    let binary name body =
+      SMT.define_fun name [ ("x", SMT.t_int); ("y", SMT.t_int) ] SMT.t_int body
+    in
+    List.iter
+      (ack_command s)
+      [ SMT.define_fun pow2_name [ ("exponent", SMT.t_int) ] SMT.t_int (pow2_body ());
+        binary bw_and_name (bitwise_body And);
+        binary bw_or_name (bitwise_body Or);
+        binary bw_xor_name (bitwise_body Xor)
+      ]
+
+
+  let pow2 exponent = SMT.app_ pow2_name [ exponent ]
+
+  let bw_and x y = SMT.app_ bw_and_name [ x; y ]
+
+  let bw_or x y = SMT.app_ bw_or_name [ x; y ]
+
+  let bw_xor x y = SMT.app_ bw_xor_name [ x; y ]
+end
+
+
 (** Translate a CN term to SMT *)
 let rec translate_term s iterm =
   let loc = get_loc iterm in
@@ -694,6 +790,7 @@ let rec translate_term s iterm =
      | BW_Compl ->
        (match get_bt iterm with
         | BT.Bits _ -> SMT.bv_compl (translate_term s e1)
+        | BT.Integer -> SMT.num_sub (SMT.int_k (-1)) (translate_term s e1)
         | _ -> failwith (__LOC__ ^ ":Unop (BW_Compl, _)"))
      | BW_CLZ ->
        (match get_bt iterm with
@@ -759,21 +856,32 @@ let rec translate_term s iterm =
         | _ -> failwith "Mod")
      (* | ModNoSMT -> uninterp_same_type CN_Names.mod' *)
      | BW_Xor ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_xor s1 s2 | _ -> failwith "BW_Xor")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_xor s1 s2
+        | BT.Integer -> CN_Integer_Exact.bw_xor s1 s2
+        | _ -> failwith "BW_Xor")
      | BW_And ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_and s1 s2 | _ -> failwith "BW_And")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_and s1 s2
+        | BT.Integer -> CN_Integer_Exact.bw_and s1 s2
+        | _ -> failwith "BW_And")
      | BW_Or ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_or s1 s2 | _ -> failwith "BW_Or")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_or s1 s2
+        | BT.Integer -> CN_Integer_Exact.bw_or s1 s2
+        | _ -> failwith "BW_Or")
      (* Shift amount should be positive? *)
      | ShiftLeft ->
        (match get_bt iterm with
         | BT.Bits _ -> SMT.bv_shl s1 s2
+        | BT.Integer -> SMT.num_mul s1 (CN_Integer_Exact.pow2 s2)
         | _ -> failwith "ShiftLeft")
      (* Amount should be positive? *)
      | ShiftRight ->
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_ashr s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_lshr s1 s2
+        | BT.Integer -> SMT.num_div s1 (CN_Integer_Exact.pow2 s2)
         | _ -> failwith "ShiftRight")
      | LT ->
        (match get_bt e1 with
@@ -1128,6 +1236,7 @@ module CN_Functions = struct
   let declare_function_group s group = List.iter (declare_or_define_function s) group
 
   let declare s =
+    CN_Integer_Exact.declare s;
     declare_arith_uf_functions s;
     List.iter (declare_function_group s) (Option.get s.globals.logical_function_order)
 end
