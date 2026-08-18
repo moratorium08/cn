@@ -104,7 +104,9 @@ let do_wrapI loc ct it =
   match Sctypes.is_integer_type ct with
   | Some ity ->
     let ity_bt = Memory.bt_of_sct ct in
-    if BT.equal ity_bt (Terms.get_bt it) then
+    if (not !BT.cnBV) then
+      return (MT.wrapI_ (ity, it) loc)
+    else if BT.equal ity_bt (Terms.get_bt it) then
       return it
     else
       return (MT.wrapI_ (ity, it) loc)
