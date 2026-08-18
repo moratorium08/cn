@@ -67,3 +67,19 @@ unsigned long large_unsigned_or(void)
 {
   return 0x8000000000000000UL | 0UL;
 }
+
+int signed_division_truncates_to_zero(int x)
+/*@ requires x == -5;
+    ensures return == -2;
+@*/
+{
+  return x / 2;
+}
+
+int signed_remainder_follows_dividend(int x)
+/*@ requires x == -5;
+    ensures return == -1;
+@*/
+{
+  return x % 2;
+}

@@ -647,6 +647,21 @@ let bv_ctz result_w =
   count
 
 
+(* SMT-LIB integer [div] rounds toward negative infinity, whereas C integer
+   division truncates toward zero.  Unsigned C operands are nonnegative, so
+   this single definition covers both signed and unsigned source types. *)
+let integer_trunc_div x y =
+  let zero = SMT.int_k 0 in
+  let negative n = SMT.num_lt n zero in
+  let abs n = SMT.ite (negative n) (SMT.num_neg n) n in
+  let magnitude = SMT.num_div (abs x) (abs y) in
+  SMT.ite (SMT.bool_xor (negative x) (negative y)) (SMT.num_neg magnitude) magnitude
+
+
+let integer_trunc_rem x y =
+  SMT.num_sub x (SMT.num_mul (integer_trunc_div x y) y)
+
+
 (* Exact, bitvector-free interpretations of the integer operations which are
    outside linear integer arithmetic.  C integer values are constrained by
    their source types; 128 is the largest integer width accepted by CN. *)
@@ -847,7 +862,8 @@ let rec translate_term s iterm =
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_sdiv s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_udiv s1 s2
-        | BT.Integer | BT.Real -> SMT.num_div s1 s2
+        | BT.Integer -> integer_trunc_div s1 s2
+        | BT.Real -> SMT.num_div s1 s2
         | _ -> failwith "Div")
      (* | DivNoSMT -> uninterp_same_type CN_Names.div *)
      | Exp ->
@@ -860,7 +876,7 @@ let rec translate_term s iterm =
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_srem s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_urem s1 s2
-        | BT.Integer -> SMT.num_rem s1 s2 (* CVC5 ?? *)
+        | BT.Integer -> integer_trunc_rem s1 s2
         | _ -> failwith "Rem")
      (* | RemNoSMT -> uninterp_same_type CN_Names.rem *)
      | Mod ->
