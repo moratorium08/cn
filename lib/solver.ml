@@ -667,6 +667,21 @@ let bv_ctz result_w =
   count
 
 
+(* SMT-LIB integer [div] rounds toward negative infinity, whereas C integer
+   division truncates toward zero.  Unsigned C operands are nonnegative, so
+   this single definition covers both signed and unsigned source types. *)
+let integer_trunc_div x y =
+  let zero = SMT.int_k 0 in
+  let negative n = SMT.num_lt n zero in
+  let abs n = SMT.ite (negative n) (SMT.num_neg n) n in
+  let magnitude = SMT.num_div (abs x) (abs y) in
+  SMT.ite (SMT.bool_xor (negative x) (negative y)) (SMT.num_neg magnitude) magnitude
+
+
+let integer_trunc_rem x y =
+  SMT.num_sub x (SMT.num_mul (integer_trunc_div x y) y)
+
+
 (** Translate a CN term to SMT *)
 let rec translate_term s iterm =
   let loc = get_loc iterm in
@@ -773,7 +788,7 @@ let rec translate_term s iterm =
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_udiv s1 s2
         | BT.Integer ->
           if Option.is_some (get_num_z e2) then
-            SMT.num_div s1 s2
+            integer_trunc_div s1 s2
           else
             uninterp_same_type CN_Names.div
         | BT.Real -> SMT.num_div s1 s2
@@ -793,7 +808,7 @@ let rec translate_term s iterm =
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_urem s1 s2
         | BT.Integer ->
           if Option.is_some (get_num_z e2) then
-            SMT.num_rem s1 s2
+            integer_trunc_rem s1 s2
           else
             uninterp_same_type CN_Names.rem
         | _ -> failwith "Rem")

@@ -64,3 +64,19 @@ unsigned int remainder_bound_assumed(unsigned int x, unsigned int y)
 {
   return x % y;
 }
+
+int signed_bitwise_assumed(void)
+/*@ requires -1 ^ 0 == -1;
+    ensures return == -1;
+@*/
+{
+  return -1 ^ 0;
+}
+
+unsigned long large_unsigned_or_assumed(void)
+/*@ requires 0x8000000000000000 | 0 == 9223372036854775808;
+    ensures return == 9223372036854775808;
+@*/
+{
+  return 0x8000000000000000UL | 0UL;
+}

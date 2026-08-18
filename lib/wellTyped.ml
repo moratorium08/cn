@@ -510,10 +510,21 @@ module WT = struct
     | IT (Cons (it, _), _, _) | it -> return @@ T.get_loc it
 
 
-  (* Integer-mode C values remain bounded by their C types, so nonlinear
-     operations are still decidable in principle.  Their SMT encoding is a
-     solver-policy choice rather than a well-typedness restriction. *)
-  let binop_nia_checks _it = return ()
+  (* Integer-mode C values remain bounded by their C types, so nonlinear C
+     operations are still decidable in principle.  CN exponentiation is not a
+     C operation and its mathematical-integer operands need not be bounded, so
+     retain the existing constant-only restriction for that operator. *)
+  let binop_nia_checks it =
+    match it with
+    | IT (Binop (Exp, t, t'), _, loc)
+      when Option.is_none (is_const t) || Option.is_none (is_const t') ->
+      let msg =
+        !^"Exponentiation"
+        ^^^ squotes (T.pp it)
+        ^^^ !^"does not have constant left and right-hand arguments."
+      in
+      (fail { loc; msg = Generic msg } [@alert "-deprecated"])
+    | _ -> return ()
 
 
   (* NOTE: This cannot _check_ what the root type of term is (the type is
