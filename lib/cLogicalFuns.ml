@@ -398,8 +398,8 @@ let rec symb_exec_pexpr ctxt var_map pexpr =
       | IOpShl -> MT.arith_binop Terms.ShiftLeft (x, MT.cast_ (Terms.get_bt x) y here) loc
       | IOpShr ->
         MT.arith_binop Terms.ShiftRight (x, MT.cast_ (Terms.get_bt x) y here) loc
-      | IOpDiv -> failwith "TODO division operator"
-      | IOpRem_t -> failwith "TODO remainder operator"
+      | IOpDiv -> MT.div_ (x, y) loc
+      | IOpRem_t -> MT.rem_ (x, y) loc
     in
     do_wrapI loc (Integer ity) it
   | PEcfunction pe ->

@@ -1128,8 +1128,8 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
       | IOpAdd -> add_
       | IOpSub -> sub_
       | IOpMul -> mul_
-      | IOpShl -> failwith "todo"
-      | IOpShr -> failwith "todo"
+      | IOpShl -> arith_binop Terms.ShiftLeft
+      | IOpShr -> arith_binop Terms.ShiftRight
       | IOpDiv -> div_
       | IOpRem_t -> rem_
     in

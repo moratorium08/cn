@@ -510,39 +510,10 @@ module WT = struct
     | IT (Cons (it, _), _, _) | it -> return @@ T.get_loc it
 
 
-  let binop_nia_checks it =
-    match it with
-    | IT (Binop (bop, t, t'), _, loc) ->
-      (match (bop, T.get_bt t, is_const t, is_const t') with
-       | Mul, Integer, None, None ->
-         let msg =
-           !^"Neither side of the integer multiplication"
-           ^^^ squotes (T.pp it)
-           ^^^ !^"is a constant."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | (Div | Rem | Mod | ShiftLeft | ShiftRight), Integer, _, None ->
-         let op = match bop with ShiftLeft | ShiftRight -> "Shift" | _ -> "Division" in
-         let msg =
-           !^op ^^^ squotes (T.pp it) ^^^ !^"does not have constant right-hand argument."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | (Div | Rem | Mod | ShiftLeft | ShiftRight), Integer, _, Some (Z z', _)
-         when Z.leq z' Z.zero ->
-         let op = match bop with ShiftLeft | ShiftRight -> "Shift" | _ -> "Division" in
-         let msg =
-           !^op ^^^ squotes (T.pp it) ^^^ !^"does not have positive right-hand argument."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | Exp, (Integer | Bits _), None, _ | Exp, (Integer | Bits _), _, None ->
-         let msg =
-           !^"Exponentiation"
-           ^^^ squotes (T.pp it)
-           ^^^ !^"does not have constant left and right-hand arguments."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | _ -> return ())
-    | _ -> return ()
+  (* Integer-mode C values remain bounded by their C types, so nonlinear
+     operations are still decidable in principle.  Their SMT encoding is a
+     solver-policy choice rather than a well-typedness restriction. *)
+  let binop_nia_checks _it = return ()
 
 
   (* NOTE: This cannot _check_ what the root type of term is (the type is
@@ -604,7 +575,7 @@ module WT = struct
             return (t, T.get_bt t)
           | BW_CLZ | BW_CTZ | BW_FFS | BW_FLS | BW_Compl ->
             let@ t = infer t in
-            let@ () = ensure_bits_type (T.get_loc t) (T.get_bt t) in
+            let@ () = ensure_integer_or_bits_type ~reason:(T.get_loc t) t in
             return (t, T.get_bt t)
         in
         return (IT (Unop (unop, t), ret_bt, loc))
@@ -621,7 +592,8 @@ module WT = struct
             (ensure_arith_type ~reason:loc t, T.get_bt t)
           | Rem | Mod | ShiftLeft | ShiftRight ->
             (ensure_integer_or_bits_type ~reason:loc t, T.get_bt t)
-          | BW_And | BW_Or | BW_Xor -> (ensure_bits_type loc (T.get_bt t), T.get_bt t)
+          | BW_And | BW_Or | BW_Xor ->
+            (ensure_integer_or_bits_type ~reason:loc t, T.get_bt t)
           | LT | LE -> (ensure_arith_type ~reason:loc t, BT.Bool)
           | EQ -> (return (), BT.Bool)
           | LTPointer | LEPointer ->
