@@ -49,3 +49,21 @@ unsigned int remainder_bound(unsigned int x, unsigned int y)
 {
   return x % y;
 }
+
+int signed_bitwise(void)
+/*@ ensures return == -1; @*/
+{
+  return -1 ^ 0;
+}
+
+unsigned int unsigned_complement(void)
+/*@ ensures return == 4294967295; @*/
+{
+  return ~0U;
+}
+
+unsigned long large_unsigned_or(void)
+/*@ ensures return == 9223372036854775808; @*/
+{
+  return 0x8000000000000000UL | 0UL;
+}
