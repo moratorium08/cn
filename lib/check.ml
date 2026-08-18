@@ -1522,8 +1522,11 @@ let bytes_constraints
         List.mapi
           (fun i byte ->
              let casted = cast_ bt (getOpt_ byte here) here in
-             let shift_amt = int_lit_ (i * 8) bt here in
-             Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here))
+             if !cnBV then
+               let shift_amt = int_lit_ (i * 8) bt here in
+               Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here)
+             else
+               mul_ (casted, z_ (Z.shift_left Z.one (i * 8)) here) here)
           bytes
       in
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
@@ -1553,8 +1556,11 @@ let bytes_constraints
         List.mapi
           (fun i byte ->
              let casted = cast_ bt (getOpt_ byte here) here in
-             let shift_amt = int_lit_ (i * 8) bt here in
-             Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here))
+             if !cnBV then
+               let shift_amt = int_lit_ (i * 8) bt here in
+               Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here)
+             else
+               mul_ (casted, z_ (Z.shift_left Z.one (i * 8)) here) here)
           bytes
       in
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
