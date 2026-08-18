@@ -18,6 +18,19 @@ let report_quiet_json ({ TypeErrors.loc; msg } : TypeErrors.t) =
     | TypeErrors.Unproven_constraint { constr; _ } ->
       ( "Unprovable constraint",
         `String (truncate (Pp.plain (LogicalConstraints.pp constr))) )
+    | TypeErrors.Missing_resource { requests; _ } ->
+      let descr =
+        Option.fold
+          ~none:`Null
+          ~some:(fun doc -> `String (truncate (Pp.plain doc)))
+          (TypeErrors.RequestChain.pp requests)
+      in
+      ("Missing resource", descr)
+    | TypeErrors.Unused_resource { resource; _ } ->
+      ("Left-over unused resource", `String (truncate (Pp.plain (Resource.pp resource))))
+    | TypeErrors.StaticError { err; _ } -> ("Static error", `String (truncate err))
+    | TypeErrors.Unsupported doc ->
+      ("Unsupported feature", `String (truncate (Pp.plain doc)))
     | _ -> ("Verification error", `Null)
   in
   let json =
