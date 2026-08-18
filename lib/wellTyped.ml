@@ -787,6 +787,7 @@ module WT = struct
         let@ target_bt = WBT.is_bt loc target_bt in
         let cast_ok =
           match (source_bt, target_bt) with
+          | source_bt, target_bt when BT.equal source_bt target_bt -> true
           | Integer, Real -> true
           | Real, Integer -> true
           | Bits _, Bits _ -> true
@@ -796,6 +797,7 @@ module WT = struct
           | Loc (), Integer -> not !cnBV
           | Loc (), Alloc_id -> true
           | MemByte, Bits _ -> true
+          | MemByte, Integer -> not !cnBV
           | MemByte, Option Alloc_id -> true
           | _, _ -> false
         in
@@ -817,9 +819,14 @@ module WT = struct
         let@ _ty = get_struct_member_type loc tag member in
         let@ t = check loc (Loc ()) t in
         let@ decl = get_struct_decl loc tag in
-        let o = Option.get (Memory.member_offset decl member) in
-        let rs = Option.get (BT.is_bits_bt Memory.uintptr_bt) in
-        let@ () = ensure_z_fits_bits_type loc rs (Z.of_int o) in
+        let@ () =
+          if !cnBV then
+            let o = Option.get (Memory.member_offset decl member) in
+            let rs = Option.get (BT.is_bits_bt Memory.uintptr_bt) in
+            ensure_z_fits_bits_type loc rs (Z.of_int o)
+          else
+            return ()
+        in
         (* looking at solver mapping *)
         return (IT (MemberShift (t, tag, member), BT.Loc (), loc))
       | ArrayShift { base; ct; index } ->

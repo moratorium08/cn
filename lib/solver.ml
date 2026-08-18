@@ -973,6 +973,7 @@ let rec translate_term s iterm =
   | Cast (cbt, t) ->
     let smt_term = translate_term s t in
     (match (get_bt t, cbt) with
+     | source_bt, target_bt when BT.equal source_bt target_bt -> smt_term
      | Bits _, Loc () ->
        assert !cnBV;
        let addr =
