@@ -1072,12 +1072,19 @@ let rec translate_term s iterm =
     let x = fresh_name "match" in
     SMT.let_ [ (x, translate_term s e1) ] (do_alts (SMT.atom x) alts)
   (* Casts *)
-  | WrapI (_ity, _arg) ->
-    failwith "todo: remove WrapI"
-    (* bv_cast *)
-    (*   ~to_:(Memory.bt_of_sct (Sctypes.Integer ity)) *)
-    (*   ~from:(get_bt arg) *)
-    (*   (translate_term s arg) *)
+  | WrapI (ity, arg) ->
+    let target_bt = Memory.bt_of_sct (Sctypes.Integer ity) in
+    if !cnBV then
+      bv_cast ~to_:target_bt ~from:(get_bt arg) (translate_term s arg)
+    else (
+      let min = Memory.min_integer_type ity in
+      let max = Memory.max_integer_type ity in
+      let modulus = Z.succ (Z.sub max min) in
+      let residue = SMT.num_mod (translate_term s arg) (SMT.int_zk modulus) in
+      SMT.ite
+        (SMT.num_leq residue (SMT.int_zk max))
+        residue
+        (SMT.num_sub residue (SMT.int_zk modulus)))
   | Cast (cbt, t) ->
     let smt_term = translate_term s t in
     (match (get_bt t, cbt) with
