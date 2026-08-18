@@ -669,11 +669,16 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
        let@ e1 = check_pexpr path_cs e1 in
        let ct = Option.get (Terms.is_ctype_const e1) in
        let@ () = WellTyped.check_ct loc ct in
-       let () = match ct with Integer _ -> () | _ -> assert false in
+       let ity = match ct with Integer ity -> ity | _ -> assert false in
        let@ () = WellTyped.ensure_base_type loc ~expect (Memory.bt_of_sct ct) in
        let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr e2) in
        let@ e2 = check_pexpr path_cs e2 in
-       return (arith_unop BW_Compl e2 loc)
+       if !cnBV then
+         return (arith_unop BW_Compl e2 loc)
+       else if Sctypes.is_unsigned_integer_type ity then
+         return (sub_ (z_ (Memory.max_integer_type ity) loc, e2) loc)
+       else
+         return (sub_ (z_ Z.minus_one loc, e2) loc)
      | CivCOMPL, _ ->
        fail (fun _ ->
          { loc;
