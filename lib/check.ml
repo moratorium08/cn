@@ -2071,19 +2071,22 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
   | Eproc (name, pes) ->
     (match (name, pes) with
      | Impl (BuiltinFunction (("ctz" | "generic_ffs") as fn)), [ pe1 ] ->
-       if !cnBV then
-         let@ _ = ensure_bitvector_type loc ~expect in
-         let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr pe1) in
-         check_pexpr pe1 (fun vt1 ->
-           let unop =
-             match fn with
-             | "ctz" -> Terms.BW_CTZ
-             | "generic_ffs" -> BW_FFS
-             | _ -> assert false
-           in
-           k (arith_unop unop vt1 loc))
-       else
-         Cerb_debug.error "todo: ctz|generic_ffs in non-bv mode"
+       let@ () =
+         if !cnBV then
+           let@ _ = ensure_bitvector_type loc ~expect in
+           return ()
+         else
+           WellTyped.ensure_base_type loc ~expect Integer
+       in
+       let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr pe1) in
+       check_pexpr pe1 (fun vt1 ->
+         let unop =
+           match fn with
+           | "ctz" -> Terms.BW_CTZ
+           | "generic_ffs" -> BW_FFS
+           | _ -> assert false
+         in
+         k (arith_unop unop vt1 loc))
      | Impl (BuiltinFunction ("ctz" | "generic_ffs")), _ ->
        let type_ = `Other in
        let has = List.length pes in
@@ -2945,8 +2948,10 @@ let wf_check_and_record_lemma (lemma_s, (loc, lemma_typ)) =
 let ctz_proxy_ft =
   let here = Locations.other __LOC__ in
   let info = (here, Some "ctz_proxy builtin ft") in
-  let n_sym, n = MT.fresh_named BT.(Bits (Unsigned, 32)) "n_" here in
-  let ret_sym, ret = MT.fresh_named BT.(Bits (Signed, 32)) "return" here in
+  let n_bt = if !cnBV then BT.(Bits (Unsigned, 32)) else BT.Integer in
+  let ret_bt = if !cnBV then BT.(Bits (Signed, 32)) else BT.Integer in
+  let n_sym, n = MT.fresh_named n_bt "n_" here in
+  let ret_sym, ret = MT.fresh_named ret_bt "return" here in
   let neq_0 = LC.T (MT.not_ (MT.eq_ (n, MT.int_lit_ 0 (T.get_bt n) here) here) here) in
   let eq_ctz =
     LC.T
