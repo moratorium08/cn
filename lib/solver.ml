@@ -661,6 +661,8 @@ module CN_Integer_Exact = struct
 
   let bw_xor_name = "cn_integer_bw_xor"
 
+  let ctz_name = "cn_integer_ctz"
+
   let int_z = SMT.int_zk
 
   let two_to i = Z.shift_left Z.one i
@@ -720,6 +722,15 @@ module CN_Integer_Exact = struct
       residue
 
 
+  let ctz_body () =
+    let value = SMT.atom "value" in
+    List.fold_right
+      (fun i otherwise ->
+         SMT.ite (bit_is_set value i) (int_z (Z.of_int i)) otherwise)
+      (List.init max_width Fun.id)
+      (int_z (Z.of_int max_width))
+
+
   let declare s =
     let binary name body =
       SMT.define_fun name [ ("x", SMT.t_int); ("y", SMT.t_int) ] SMT.t_int body
@@ -727,6 +738,7 @@ module CN_Integer_Exact = struct
     List.iter
       (ack_command s)
       [ SMT.define_fun pow2_name [ ("exponent", SMT.t_int) ] SMT.t_int (pow2_body ());
+        SMT.define_fun ctz_name [ ("value", SMT.t_int) ] SMT.t_int (ctz_body ());
         binary bw_and_name (bitwise_body And);
         binary bw_or_name (bitwise_body Or);
         binary bw_xor_name (bitwise_body Xor)
@@ -740,6 +752,8 @@ module CN_Integer_Exact = struct
   let bw_or x y = SMT.app_ bw_or_name [ x; y ]
 
   let bw_xor x y = SMT.app_ bw_xor_name [ x; y ]
+
+  let ctz x = SMT.app_ ctz_name [ x ]
 end
 
 
@@ -799,6 +813,7 @@ let rec translate_term s iterm =
      | BW_CTZ ->
        (match get_bt iterm with
         | BT.Bits (_, w) -> maybe_name (translate_term s e1) (bv_ctz w w)
+        | BT.Integer -> CN_Integer_Exact.ctz (translate_term s e1)
         | _ -> failwith "solver: BW_CTZ_NoSMT: not a bitwise type"))
   | Binop (op, e1, e2) ->
     let s1 = translate_term s e1 in
