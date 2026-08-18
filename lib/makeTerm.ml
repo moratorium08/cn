@@ -468,7 +468,12 @@ let value_check mode (struct_layouts : Memory.struct_decls) ct about loc =
   let rec aux (ct_ : Sctypes.t) about =
     match ct_ with
     | Void -> bool_ true loc
-    | Byte -> if BT.(!cnBV) then bool_ true loc else failwith "todo: Byte value_check"
+    | Byte ->
+      if BT.(!cnBV) then
+        bool_ true loc
+      else
+        let value = cast_ BT.Integer (getOpt_ about loc) loc in
+        impl_ (isSome_ about loc, in_z_range value (Z.zero, Z.of_int 255) loc) loc
     | Integer it ->
       in_z_range about (Memory.min_integer_type it, Memory.max_integer_type it) loc
     | Array (_, None) ->
