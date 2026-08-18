@@ -415,6 +415,17 @@ let integer_wrapI loc ity n =
   MT.ite_ (le_ (r, z_ (Memory.max_integer_type ity) loc) loc, r, sub_ (r, dlt) loc) loc
 
 
+(* Keep the wrapping fallback required by C, but do not carry its modular
+   arithmetic into later queries when the current path already proves that the
+   mathematical result fits the destination type. *)
+let integer_wrapI_if_needed loc ity n =
+  assert (not !cnBV);
+  let@ provable = provable loc in
+  match provable (LC.T (representable_ (Sctypes.Integer ity, n) loc)) with
+  | `True -> return n
+  | `False -> return (integer_wrapI loc ity n)
+
+
 let check_conv_int loc ~expect ct arg =
   assert (
     match (!cnBV, expect, T.get_bt arg) with
@@ -451,7 +462,7 @@ let check_conv_int loc ~expect ct arg =
       if !cnBV then
         return (cast_ (Memory.bt_of_sct ct) arg loc)
       else
-        return (integer_wrapI here ity arg)
+        integer_wrapI_if_needed here ity arg
     | _ ->
       (match provable (LC.T (representable_ (ct, arg) here)) with
        | `True ->
@@ -1143,7 +1154,7 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
      | PEwrapI _ ->
        assert (
          Mu.is_div_iop iop || Mu.is_remt_iop iop || Sctypes.is_unsigned_integer_type ity);
-       return (integer_wrapI loc ity r)
+       integer_wrapI_if_needed loc ity r
      | PEcatch_exceptional_condition _ ->
        let@ provable = provable loc in
        (match provable (LC.T (representable_ (Integer ity, r) loc)) with
