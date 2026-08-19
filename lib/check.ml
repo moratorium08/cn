@@ -2347,13 +2347,20 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
             msg = Generic !^"todo: 'have' not implemented yet" [@alert "-deprecated"]
           })
       | Instantiate (to_instantiate, it) ->
-        let filter =
-          match to_instantiate with
-          | I_Everything -> fun _ -> true
-          | I_Function f -> Terms.mentions_call f
-          | I_Good ct -> Terms.mentions_good ct
-        in
-        instantiate loc filter it
+        (match to_instantiate with
+         | I_Function f when Builtins.is_reveal_bv_sym f ->
+           (* In integer/BV hybrid mode, conversions are opaque by default.
+              This marker is translated by Solver into the concrete
+              conversion equations needed by the selected expression. *)
+           add_c loc (LC.T (apply_ f [ it ] BT.Bool loc))
+         | _ ->
+           let filter =
+             match to_instantiate with
+             | I_Everything -> fun _ -> true
+             | I_Function f -> Terms.mentions_call f
+             | I_Good ct -> Terms.mentions_good ct
+           in
+           instantiate loc filter it)
       | Split_case _ -> assert false
       | Extract (attrs, to_extract, it) ->
         let@ predicate_name =
