@@ -68,6 +68,7 @@ let verify
       only
       skip
       csv_times
+      stdout_times
       solver_logging
       solver_flags
       solver_path
@@ -129,6 +130,7 @@ let verify
     ~coq_proof_log
     ~coq_check_proof_log
     ~csv_times
+    ~stdout_times
     ~astprints
     ~no_inherit_loc
     ~magic_comment_char_dollar
@@ -354,6 +356,7 @@ let verify_t : unit Term.t =
   $ Flags.only
   $ Flags.skip
   $ Common.Flags.csv_times
+  $ Common.Flags.stdout_times
   $ Flags.solver_logging
   $ Flags.solver_flags
   $ Flags.solver_path
