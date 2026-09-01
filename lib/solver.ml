@@ -43,6 +43,26 @@ module CN_Names = struct
   let rem bt = "rem_uf_" ^ Pp.plain (BT.pp bt)
 
   let mod' bt = "mod_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_compl bt = "bw_compl_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_clz bt = "bw_clz_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_ctz bt = "bw_ctz_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_ffs bt = "bw_ffs_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_fls bt = "bw_fls_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_xor bt = "bw_xor_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_and bt = "bw_and_uf_" ^ Pp.plain (BT.pp bt)
+
+  let bw_or bt = "bw_or_uf_" ^ Pp.plain (BT.pp bt)
+
+  let shift_left bt = "shift_left_uf_" ^ Pp.plain (BT.pp bt)
+
+  let shift_right bt = "shift_right_uf_" ^ Pp.plain (BT.pp bt)
 end
 
 type solver_frame =
@@ -642,6 +662,116 @@ let bv_ctz result_w =
   count
 
 
+(* SMT-LIB integer [div] rounds toward negative infinity, whereas C integer
+   division truncates toward zero.  Unsigned C operands are nonnegative, so
+   this single definition covers both signed and unsigned source types. *)
+let integer_trunc_div x y =
+  let zero = SMT.int_k 0 in
+  let negative n = SMT.num_lt n zero in
+  let abs n = SMT.ite (negative n) (SMT.num_neg n) n in
+  let magnitude = SMT.num_div (abs x) (abs y) in
+  SMT.ite (SMT.bool_xor (negative x) (negative y)) (SMT.num_neg magnitude) magnitude
+
+
+let integer_trunc_rem x y =
+  SMT.num_sub x (SMT.num_mul (integer_trunc_div x y) y)
+
+
+(* Hybrid integer/bitvector encoding.
+
+   Integer-mode values remain SMT Ints.  Operations whose semantics is
+   intrinsically bit-oriented are performed on a sufficiently wide BV and
+   converted back to Int.  The two conversions are uninterpreted by default;
+   `instantiate reveal_bv, e` adds their concrete SMT definitions only for
+   conversion applications occurring in [e].
+
+   256 bits are enough to avoid prematurely wrapping a shift of any supported
+   (at most 128-bit) C integer by a valid C shift amount. *)
+module CN_Integer_Hybrid = struct
+  (* Bitwise operations need the largest supported C width.  Shifts use twice
+     that width so that the checker can still detect signed overflow before a
+     result is narrowed back to its C type. *)
+  let width = function ShiftLeft | ShiftRight -> 256 | _ -> 128
+
+  let modulus op = Z.shift_left Z.one (width op)
+
+  let bv_of_z_name width = "cn_integer_bv_of_z_" ^ string_of_int width
+
+  let z_of_bv_name width = "cn_integer_z_of_bv_" ^ string_of_int width
+
+  let declare_width s width =
+    ack_command
+      s
+      (SMT.declare_fun (bv_of_z_name width) [ SMT.t_int ] (SMT.t_bits width));
+    ack_command
+      s
+      (SMT.declare_fun (z_of_bv_name width) [ SMT.t_bits width ] SMT.t_int)
+
+
+  let declare s = List.iter (declare_width s) [ 128; 256 ]
+
+  let bv_of_z width x = SMT.app_ (bv_of_z_name width) [ x ]
+
+  let z_of_bv width x = SMT.app_ (z_of_bv_name width) [ x ]
+
+  let concrete_bv_of_z width x = SMT.app (SMT.ifam "int_to_bv" [ width ]) [ x ]
+
+  let concrete_z_of_bv solver_extensions x =
+    let name = match solver_extensions with SMT.CVC5 -> "ubv_to_int" | _ -> "bv2int" in
+    SMT.app_ name [ x ]
+
+
+  let is_hybrid_binop = function
+    | BW_And | BW_Or | BW_Xor | ShiftLeft | ShiftRight -> true
+    | _ -> false
+
+
+  let encoded_bits op x y =
+    let width = width op in
+    let bx = bv_of_z width x in
+    let by = bv_of_z width y in
+    match op with
+    | BW_And -> SMT.bv_and bx by
+    | BW_Or -> SMT.bv_or bx by
+    | BW_Xor -> SMT.bv_xor bx by
+    | ShiftLeft -> SMT.bv_shl bx by
+    | ShiftRight ->
+      SMT.ite
+        (SMT.num_lt x (SMT.int_k 0))
+        (SMT.bv_ashr bx by)
+        (SMT.bv_lshr bx by)
+    | _ -> assert false
+
+
+  let result_is_negative op x y =
+    let x_neg = SMT.num_lt x (SMT.int_k 0) in
+    let y_neg = SMT.num_lt y (SMT.int_k 0) in
+    match op with
+    | BW_And -> SMT.bool_and x_neg y_neg
+    | BW_Or -> SMT.bool_or x_neg y_neg
+    | BW_Xor -> SMT.bool_xor x_neg y_neg
+    | ShiftLeft | ShiftRight -> x_neg
+    | _ -> assert false
+
+
+  let encode op x y =
+    let unsigned = z_of_bv (width op) (encoded_bits op x y) in
+    SMT.ite
+      (result_is_negative op x y)
+      (SMT.num_sub unsigned (SMT.int_zk (modulus op)))
+      unsigned
+
+
+  let reveal_equations solver_extensions op x y =
+    let width = width op in
+    let bits = encoded_bits op x y in
+    [ SMT.eq (bv_of_z width x) (concrete_bv_of_z width x);
+      SMT.eq (bv_of_z width y) (concrete_bv_of_z width y);
+      SMT.eq (z_of_bv width bits) (concrete_z_of_bv solver_extensions bits)
+    ]
+end
+
+
 (** Translate a CN term to SMT *)
 let rec translate_term s iterm =
   let loc = get_loc iterm in
@@ -661,7 +791,13 @@ let rec translate_term s iterm =
   | Const c -> translate_const s c
   | Sym x -> SMT.atom (CN_Names.fn_name x)
   | Unop (op, e1) ->
+    let uninterp_same_type k =
+      let bt = get_bt iterm in
+      SMT.app (Atom (k bt)) [ translate_term s e1 ]
+    in
     (match op with
+     | BW_FFS when BT.equal (get_bt iterm) BT.Integer ->
+       uninterp_same_type CN_Names.bw_ffs
      | BW_FFS ->
        (* NOTE: This desugaring duplicates e1 *)
        let intl i = MT.int_lit_ i (get_bt e1) loc in
@@ -670,6 +806,8 @@ let rec translate_term s iterm =
          (ite_
             (eq_ (e1, intl 0) loc, intl 0, add_ (arith_unop BW_CTZ e1 loc, intl 1) loc)
             loc)
+     | BW_FLS when BT.equal (get_bt iterm) BT.Integer ->
+       uninterp_same_type CN_Names.bw_fls
      | BW_FLS ->
        (* copying and adjusting BW_FFS_NoSMT rule *)
        (* NOTE: This desugaring duplicates e1 *)
@@ -689,20 +827,23 @@ let rec translate_term s iterm =
      | BW_Compl ->
        (match get_bt iterm with
         | BT.Bits _ -> SMT.bv_compl (translate_term s e1)
+        | BT.Integer -> SMT.num_sub (SMT.int_k (-1)) (translate_term s e1)
         | _ -> failwith (__LOC__ ^ ":Unop (BW_Compl, _)"))
      | BW_CLZ ->
        (match get_bt iterm with
         | BT.Bits (_, w) -> maybe_name (translate_term s e1) (bv_clz w w)
+        | BT.Integer -> uninterp_same_type CN_Names.bw_clz
         | _ -> failwith "solver: BW_CLZ_NoSMT: not a bitwise type")
      | BW_CTZ ->
        (match get_bt iterm with
         | BT.Bits (_, w) -> maybe_name (translate_term s e1) (bv_ctz w w)
+        | BT.Integer -> uninterp_same_type CN_Names.bw_ctz
         | _ -> failwith "solver: BW_CTZ_NoSMT: not a bitwise type"))
   | Binop (op, e1, e2) ->
     let s1 = translate_term s e1 in
     let s2 = translate_term s e2 in
     (* binary uninterpreted function, same type for arguments and result. *)
-    let _uninterp_same_type k =
+    let uninterp_same_type k =
       let bt = get_bt iterm in
       SMT.app (Atom (k bt)) [ s1; s2 ]
     in
@@ -723,27 +864,31 @@ let rec translate_term s iterm =
      | Mul ->
        (match get_bt iterm with
         | BT.Bits _ -> SMT.bv_mul s1 s2
-        | BT.Integer | BT.Real -> SMT.num_mul s1 s2
+        | BT.Integer -> SMT.num_mul s1 s2
+        | BT.Real -> SMT.num_mul s1 s2
         | _ -> failwith "Mul")
      (* | MulNoSMT -> uninterp_same_type CN_Names.mul *)
      | Div ->
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_sdiv s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_udiv s1 s2
-        | BT.Integer | BT.Real -> SMT.num_div s1 s2
+        | BT.Integer -> integer_trunc_div s1 s2
+        | BT.Real -> SMT.num_div s1 s2
         | _ -> failwith "Div")
      (* | DivNoSMT -> uninterp_same_type CN_Names.div *)
      | Exp ->
        (match (get_num_z e1, get_num_z e2) with
         | Some z1, Some z2 when Z.fits_int z2 ->
           translate_term s (num_lit_ (Z.pow z1 (Z.to_int z2)) (get_bt e1) loc)
+        | _, _ when BT.equal (get_bt iterm) BT.Integer ->
+          uninterp_same_type CN_Names.exp
         | _, _ -> failwith "Exp")
      (* | ExpNoSMT -> uninterp_same_type CN_Names.exp *)
      | Rem ->
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_srem s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_urem s1 s2
-        | BT.Integer -> SMT.num_rem s1 s2 (* CVC5 ?? *)
+        | BT.Integer -> integer_trunc_rem s1 s2
         | _ -> failwith "Rem")
      (* | RemNoSMT -> uninterp_same_type CN_Names.rem *)
      | Mod ->
@@ -754,21 +899,32 @@ let rec translate_term s iterm =
         | _ -> failwith "Mod")
      (* | ModNoSMT -> uninterp_same_type CN_Names.mod' *)
      | BW_Xor ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_xor s1 s2 | _ -> failwith "BW_Xor")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_xor s1 s2
+        | BT.Integer -> CN_Integer_Hybrid.encode op s1 s2
+        | _ -> failwith "BW_Xor")
      | BW_And ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_and s1 s2 | _ -> failwith "BW_And")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_and s1 s2
+        | BT.Integer -> CN_Integer_Hybrid.encode op s1 s2
+        | _ -> failwith "BW_And")
      | BW_Or ->
-       (match get_bt iterm with BT.Bits _ -> SMT.bv_or s1 s2 | _ -> failwith "BW_Or")
+       (match get_bt iterm with
+        | BT.Bits _ -> SMT.bv_or s1 s2
+        | BT.Integer -> CN_Integer_Hybrid.encode op s1 s2
+        | _ -> failwith "BW_Or")
      (* Shift amount should be positive? *)
      | ShiftLeft ->
        (match get_bt iterm with
         | BT.Bits _ -> SMT.bv_shl s1 s2
+        | BT.Integer -> CN_Integer_Hybrid.encode op s1 s2
         | _ -> failwith "ShiftLeft")
      (* Amount should be positive? *)
      | ShiftRight ->
        (match get_bt iterm with
         | BT.Bits (BT.Signed, _) -> SMT.bv_ashr s1 s2
         | BT.Bits (BT.Unsigned, _) -> SMT.bv_lshr s1 s2
+        | BT.Integer -> CN_Integer_Hybrid.encode op s1 s2
         | _ -> failwith "ShiftRight")
      | LT ->
        (match get_bt e1 with
@@ -913,6 +1069,19 @@ let rec translate_term s iterm =
     SMT.arr_store (translate_term s mp) (translate_term s k) (translate_term s v)
   | MapGet (mp, k) -> SMT.arr_select (translate_term s mp) (translate_term s k)
   | MapDef _ -> failwith "MapDef"
+  | Apply (fn, [ arg ]) when Builtins.is_reveal_bv_sym fn ->
+    Terms.Normal.fold_subterms
+      (fun _ equations subterm ->
+         match (get_term subterm, get_bt subterm) with
+         | Binop (op, e1, e2), BT.Integer when CN_Integer_Hybrid.is_hybrid_binop op ->
+           let s1 = translate_term s e1 in
+           let s2 = translate_term s e2 in
+           CN_Integer_Hybrid.reveal_equations s.smt_solver.config.exts op s1 s2
+           @ equations
+         | _ -> equations)
+      []
+      arg
+    |> SMT.bool_ands
   | Apply (fn, args) ->
     SMT.(app (atom (CN_Names.fn_name fn)) (List.map (translate_term s) args))
   | Let ((x, e1), e2) ->
@@ -954,15 +1123,23 @@ let rec translate_term s iterm =
     let x = fresh_name "match" in
     SMT.let_ [ (x, translate_term s e1) ] (do_alts (SMT.atom x) alts)
   (* Casts *)
-  | WrapI (_ity, _arg) ->
-    failwith "todo: remove WrapI"
-    (* bv_cast *)
-    (*   ~to_:(Memory.bt_of_sct (Sctypes.Integer ity)) *)
-    (*   ~from:(get_bt arg) *)
-    (*   (translate_term s arg) *)
+  | WrapI (ity, arg) ->
+    let target_bt = Memory.bt_of_sct (Sctypes.Integer ity) in
+    if !cnBV then
+      bv_cast ~to_:target_bt ~from:(get_bt arg) (translate_term s arg)
+    else (
+      let min = Memory.min_integer_type ity in
+      let max = Memory.max_integer_type ity in
+      let modulus = Z.succ (Z.sub max min) in
+      let residue = SMT.num_mod (translate_term s arg) (SMT.int_zk modulus) in
+      SMT.ite
+        (SMT.num_leq residue (SMT.int_zk max))
+        residue
+        (SMT.num_sub residue (SMT.int_zk modulus)))
   | Cast (cbt, t) ->
     let smt_term = translate_term s t in
     (match (get_bt t, cbt) with
+     | source_bt, target_bt when BT.equal source_bt target_bt -> smt_term
      | Bits _, Loc () ->
        assert !cnBV;
        let addr =
@@ -1098,12 +1275,20 @@ module CN_Functions = struct
     (* as currently supported in the CN parser *)
     let bit_bts = List.concat_map bit_bts_of_size sizes in
     let bts = BT.Integer :: bit_bts in
-    let declare_per_bt fn bt =
+    let declare_binary_per_bt fn bt =
       let t = translate_base_type bt in
       ack_command s (SMT.declare_fun (fn bt) [ t; t ] t)
     in
-    let declare fn = List.iter (declare_per_bt fn) bts in
-    List.iter declare CN_Names.[ mul; div; exp; rem; mod' ]
+    let declare_unary_per_bt fn bt =
+      let t = translate_base_type bt in
+      ack_command s (SMT.declare_fun (fn bt) [ t ] t)
+    in
+    let declare_binary fn = List.iter (declare_binary_per_bt fn) bts in
+    let declare_unary fn = List.iter (declare_unary_per_bt fn) bts in
+    List.iter
+      declare_binary
+      CN_Names.[ mul; div; exp; rem; mod'; bw_xor; bw_and; bw_or; shift_left; shift_right ];
+    List.iter declare_unary CN_Names.[ bw_compl; bw_clz; bw_ctz; bw_ffs; bw_fls ]
 
 
   let declare_or_define_function s fn =
@@ -1116,6 +1301,7 @@ module CN_Functions = struct
   let declare_function_group s group = List.iter (declare_or_define_function s) group
 
   let declare s =
+    CN_Integer_Hybrid.declare s;
     declare_arith_uf_functions s;
     List.iter (declare_function_group s) (Option.get s.globals.logical_function_order)
 end

@@ -415,6 +415,17 @@ let integer_wrapI loc ity n =
   MT.ite_ (le_ (r, z_ (Memory.max_integer_type ity) loc) loc, r, sub_ (r, dlt) loc) loc
 
 
+(* Keep the wrapping fallback required by C, but do not carry its modular
+   arithmetic into later queries when the current path already proves that the
+   mathematical result fits the destination type. *)
+let integer_wrapI_if_needed loc ity n =
+  assert (not !cnBV);
+  let@ provable = provable loc in
+  match provable (LC.T (representable_ (Sctypes.Integer ity, n) loc)) with
+  | `True -> return n
+  | `False -> return (integer_wrapI loc ity n)
+
+
 let check_conv_int loc ~expect ct arg =
   assert (
     match (!cnBV, expect, T.get_bt arg) with
@@ -451,7 +462,7 @@ let check_conv_int loc ~expect ct arg =
       if !cnBV then
         return (cast_ (Memory.bt_of_sct ct) arg loc)
       else
-        return (integer_wrapI here ity arg)
+        integer_wrapI_if_needed here ity arg
     | _ ->
       (match provable (LC.T (representable_ (ct, arg) here)) with
        | `True ->
@@ -669,11 +680,16 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
        let@ e1 = check_pexpr path_cs e1 in
        let ct = Option.get (Terms.is_ctype_const e1) in
        let@ () = WellTyped.check_ct loc ct in
-       let () = match ct with Integer _ -> () | _ -> assert false in
+       let ity = match ct with Integer ity -> ity | _ -> assert false in
        let@ () = WellTyped.ensure_base_type loc ~expect (Memory.bt_of_sct ct) in
        let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr e2) in
        let@ e2 = check_pexpr path_cs e2 in
-       return (arith_unop BW_Compl e2 loc)
+       if !cnBV then
+         return (arith_unop BW_Compl e2 loc)
+       else if Sctypes.is_unsigned_integer_type ity then
+         return (sub_ (z_ (Memory.max_integer_type ity) loc, e2) loc)
+       else
+         return (sub_ (z_ Z.minus_one loc, e2) loc)
      | CivCOMPL, _ ->
        fail (fun _ ->
          { loc;
@@ -1128,8 +1144,8 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
       | IOpAdd -> add_
       | IOpSub -> sub_
       | IOpMul -> mul_
-      | IOpShl -> failwith "todo"
-      | IOpShr -> failwith "todo"
+      | IOpShl -> arith_binop Terms.ShiftLeft
+      | IOpShr -> arith_binop Terms.ShiftRight
       | IOpDiv -> div_
       | IOpRem_t -> rem_
     in
@@ -1138,7 +1154,7 @@ let rec check_pexpr path_cs (pe : BT.t Mu.pexpr) : T.t m =
      | PEwrapI _ ->
        assert (
          Mu.is_div_iop iop || Mu.is_remt_iop iop || Sctypes.is_unsigned_integer_type ity);
-       return (integer_wrapI loc ity r)
+       integer_wrapI_if_needed loc ity r
      | PEcatch_exceptional_condition _ ->
        let@ provable = provable loc in
        (match provable (LC.T (representable_ (Integer ity, r) loc)) with
@@ -1498,6 +1514,14 @@ let bytes_constraints
   =
   (* FIXME this hard codes big endianness but this should be switchable *)
   let here = Locations.other __LOC__ in
+  let byte_is_valid byte =
+    let is_some = isSome_ byte here in
+    if !cnBV then
+      is_some
+    else
+      let value = cast_ BT.Integer (getOpt_ byte here) here in
+      and2_ (is_some, MT.in_z_range value (Z.zero, Z.of_int 255) here) here
+  in
   match ct with
   | Sctypes.Void | Array (_, _) | Struct _ | Function (_, _, _) | Byte ->
     fail (fun _ -> { loc; msg = Unsupported_byte_conv_ct ct })
@@ -1509,22 +1533,25 @@ let bytes_constraints
         let index = int_lit_ i WellTyped.default_quantifier_bt here in
         map_get_ byte_arr index here)
     in
-    let all_some = and_ (List.map (fun byte -> isSome_ byte here) bytes) here in
+    let valid_bytes = and_ (List.map byte_is_valid bytes) here in
     let rhs =
       let shifted =
         List.mapi
           (fun i byte ->
              let casted = cast_ bt (getOpt_ byte here) here in
-             let shift_amt = int_lit_ (i * 8) bt here in
-             Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here))
+             if !cnBV then
+               let shift_amt = int_lit_ (i * 8) bt here in
+               Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here)
+             else
+               mul_ (casted, z_ (Z.shift_left Z.one (i * 8)) here) here)
           bytes
       in
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
     in
     (match to_from with
-     | To -> return (and2_ (all_some, eq_ (lhs, rhs) here) here)
+     | To -> return (and2_ (valid_bytes, eq_ (lhs, rhs) here) here)
      | From ->
-       let lc = LC.T all_some in
+       let lc = LC.T valid_bytes in
        let@ provable = provable loc in
        (match provable lc with
         | `True -> return (eq_ (lhs, rhs) here)
@@ -1546,19 +1573,22 @@ let bytes_constraints
         List.mapi
           (fun i byte ->
              let casted = cast_ bt (getOpt_ byte here) here in
-             let shift_amt = int_lit_ (i * 8) bt here in
-             Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here))
+             if !cnBV then
+               let shift_amt = int_lit_ (i * 8) bt here in
+               Terms.IT (Binop (ShiftLeft, casted, shift_amt), bt, here)
+             else
+               mul_ (casted, z_ (Z.shift_left Z.one (i * 8)) here) here)
           bytes
       in
       List.fold_left (fun x y -> MT.add_ (x, y) here) (List.hd shifted) (List.tl shifted)
     in
-    let all_some = and_ (List.map (fun byte -> isSome_ byte here) bytes) here in
+    let valid_bytes = and_ (List.map byte_is_valid bytes) here in
     let bytes_prov =
       List.map (fun byte -> cast_ (BT.Option Alloc_id) (getOpt_ byte here) here) bytes
     in
     (match to_from with
      | From ->
-       let lc = LC.T all_some in
+       let lc = LC.T valid_bytes in
        let@ provable = provable loc in
        (match provable lc with
         | `False ->
@@ -1621,7 +1651,8 @@ let bytes_constraints
               bytes_prov)
            here
        in
-       return (and_ [ all_some; bytes_prov_eq; eq_ (value_addr, bytes_addr) here ] here))
+       return
+         (and_ [ valid_bytes; bytes_prov_eq; eq_ (value_addr, bytes_addr) here ] here))
 
 
 let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
@@ -2049,19 +2080,22 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
   | Eproc (name, pes) ->
     (match (name, pes) with
      | Impl (BuiltinFunction (("ctz" | "generic_ffs") as fn)), [ pe1 ] ->
-       if !cnBV then
-         let@ _ = ensure_bitvector_type loc ~expect in
-         let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr pe1) in
-         check_pexpr pe1 (fun vt1 ->
-           let unop =
-             match fn with
-             | "ctz" -> Terms.BW_CTZ
-             | "generic_ffs" -> BW_FFS
-             | _ -> assert false
-           in
-           k (arith_unop unop vt1 loc))
-       else
-         Cerb_debug.error "todo: ctz|generic_ffs in non-bv mode"
+       let@ () =
+         if !cnBV then
+           let@ _ = ensure_bitvector_type loc ~expect in
+           return ()
+         else
+           WellTyped.ensure_base_type loc ~expect Integer
+       in
+       let@ () = WellTyped.ensure_base_type loc ~expect (Mu.bt_of_pexpr pe1) in
+       check_pexpr pe1 (fun vt1 ->
+         let unop =
+           match fn with
+           | "ctz" -> Terms.BW_CTZ
+           | "generic_ffs" -> BW_FFS
+           | _ -> assert false
+         in
+         k (arith_unop unop vt1 loc))
      | Impl (BuiltinFunction ("ctz" | "generic_ffs")), _ ->
        let type_ = `Other in
        let has = List.length pes in
@@ -2311,13 +2345,20 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
             msg = Generic !^"todo: 'have' not implemented yet" [@alert "-deprecated"]
           })
       | Instantiate (to_instantiate, it) ->
-        let filter =
-          match to_instantiate with
-          | I_Everything -> fun _ -> true
-          | I_Function f -> Terms.mentions_call f
-          | I_Good ct -> Terms.mentions_good ct
-        in
-        instantiate loc filter it
+        (match to_instantiate with
+         | I_Function f when Builtins.is_reveal_bv_sym f ->
+           (* In integer/BV hybrid mode, conversions are opaque by default.
+              This marker is translated by Solver into the concrete
+              conversion equations needed by the selected expression. *)
+           add_c loc (LC.T (apply_ f [ it ] BT.Bool loc))
+         | _ ->
+           let filter =
+             match to_instantiate with
+             | I_Everything -> fun _ -> true
+             | I_Function f -> Terms.mentions_call f
+             | I_Good ct -> Terms.mentions_good ct
+           in
+           instantiate loc filter it)
       | Split_case _ -> assert false
       | Extract (attrs, to_extract, it) ->
         let@ predicate_name =
@@ -2920,8 +2961,10 @@ let wf_check_and_record_lemma (lemma_s, (loc, lemma_typ)) =
 let ctz_proxy_ft =
   let here = Locations.other __LOC__ in
   let info = (here, Some "ctz_proxy builtin ft") in
-  let n_sym, n = MT.fresh_named BT.(Bits (Unsigned, 32)) "n_" here in
-  let ret_sym, ret = MT.fresh_named BT.(Bits (Signed, 32)) "return" here in
+  let n_bt = if !cnBV then BT.(Bits (Unsigned, 32)) else BT.Integer in
+  let ret_bt = if !cnBV then BT.(Bits (Signed, 32)) else BT.Integer in
+  let n_sym, n = MT.fresh_named n_bt "n_" here in
+  let ret_sym, ret = MT.fresh_named ret_bt "return" here in
   let neq_0 = LC.T (MT.not_ (MT.eq_ (n, MT.int_lit_ 0 (T.get_bt n) here) here) here) in
   let eq_ctz =
     LC.T
@@ -3008,15 +3051,12 @@ let add_stdlib_spec =
     List.fold_left
       (fun map (name, ft) -> StrMap.add name ft map)
       StrMap.empty
-      (if !cnBV then
-         [ ("ctz_proxy", ctz_proxy_ft);
-           ("ffs_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Int_);
-           ("ffsl_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Long);
-           ("ffsll_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.LongLong);
-           ("memcpy_proxy", memcpy_proxy_ft)
-         ]
-       else
-         [])
+      [ ("ctz_proxy", ctz_proxy_ft);
+        ("ffs_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Int_);
+        ("ffsl_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.Long);
+        ("ffsll_proxy", ffs_proxy_ft Sctypes.IntegerBaseTypes.LongLong);
+        ("memcpy_proxy", memcpy_proxy_ft)
+      ]
   in
   let add ct fsym ft =
     Pp.debug

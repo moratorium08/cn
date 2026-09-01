@@ -510,38 +510,20 @@ module WT = struct
     | IT (Cons (it, _), _, _) | it -> return @@ T.get_loc it
 
 
+  (* Integer-mode C values remain bounded by their C types, so nonlinear C
+     operations are still decidable in principle.  CN exponentiation is not a
+     C operation and its mathematical-integer operands need not be bounded, so
+     retain the existing constant-only restriction for that operator. *)
   let binop_nia_checks it =
     match it with
-    | IT (Binop (bop, t, t'), _, loc) ->
-      (match (bop, T.get_bt t, is_const t, is_const t') with
-       | Mul, Integer, None, None ->
-         let msg =
-           !^"Neither side of the integer multiplication"
-           ^^^ squotes (T.pp it)
-           ^^^ !^"is a constant."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | (Div | Rem | Mod | ShiftLeft | ShiftRight), Integer, _, None ->
-         let op = match bop with ShiftLeft | ShiftRight -> "Shift" | _ -> "Division" in
-         let msg =
-           !^op ^^^ squotes (T.pp it) ^^^ !^"does not have constant right-hand argument."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | (Div | Rem | Mod | ShiftLeft | ShiftRight), Integer, _, Some (Z z', _)
-         when Z.leq z' Z.zero ->
-         let op = match bop with ShiftLeft | ShiftRight -> "Shift" | _ -> "Division" in
-         let msg =
-           !^op ^^^ squotes (T.pp it) ^^^ !^"does not have positive right-hand argument."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | Exp, (Integer | Bits _), None, _ | Exp, (Integer | Bits _), _, None ->
-         let msg =
-           !^"Exponentiation"
-           ^^^ squotes (T.pp it)
-           ^^^ !^"does not have constant left and right-hand arguments."
-         in
-         (fail { loc; msg = Generic msg } [@alert "-deprecated"])
-       | _ -> return ())
+    | IT (Binop (Exp, t, t'), _, loc)
+      when Option.is_none (is_const t) || Option.is_none (is_const t') ->
+      let msg =
+        !^"Exponentiation"
+        ^^^ squotes (T.pp it)
+        ^^^ !^"does not have constant left and right-hand arguments."
+      in
+      (fail { loc; msg = Generic msg } [@alert "-deprecated"])
     | _ -> return ()
 
 
@@ -604,7 +586,7 @@ module WT = struct
             return (t, T.get_bt t)
           | BW_CLZ | BW_CTZ | BW_FFS | BW_FLS | BW_Compl ->
             let@ t = infer t in
-            let@ () = ensure_bits_type (T.get_loc t) (T.get_bt t) in
+            let@ () = ensure_integer_or_bits_type ~reason:(T.get_loc t) t in
             return (t, T.get_bt t)
         in
         return (IT (Unop (unop, t), ret_bt, loc))
@@ -621,7 +603,8 @@ module WT = struct
             (ensure_arith_type ~reason:loc t, T.get_bt t)
           | Rem | Mod | ShiftLeft | ShiftRight ->
             (ensure_integer_or_bits_type ~reason:loc t, T.get_bt t)
-          | BW_And | BW_Or | BW_Xor -> (ensure_bits_type loc (T.get_bt t), T.get_bt t)
+          | BW_And | BW_Or | BW_Xor ->
+            (ensure_integer_or_bits_type ~reason:loc t, T.get_bt t)
           | LT | LE -> (ensure_arith_type ~reason:loc t, BT.Bool)
           | EQ -> (return (), BT.Bool)
           | LTPointer | LEPointer ->
@@ -787,6 +770,7 @@ module WT = struct
         let@ target_bt = WBT.is_bt loc target_bt in
         let cast_ok =
           match (source_bt, target_bt) with
+          | source_bt, target_bt when BT.equal source_bt target_bt -> true
           | Integer, Real -> true
           | Real, Integer -> true
           | Bits _, Bits _ -> true
@@ -796,6 +780,7 @@ module WT = struct
           | Loc (), Integer -> not !cnBV
           | Loc (), Alloc_id -> true
           | MemByte, Bits _ -> true
+          | MemByte, Integer -> not !cnBV
           | MemByte, Option Alloc_id -> true
           | _, _ -> false
         in
@@ -817,9 +802,14 @@ module WT = struct
         let@ _ty = get_struct_member_type loc tag member in
         let@ t = check loc (Loc ()) t in
         let@ decl = get_struct_decl loc tag in
-        let o = Option.get (Memory.member_offset decl member) in
-        let rs = Option.get (BT.is_bits_bt Memory.uintptr_bt) in
-        let@ () = ensure_z_fits_bits_type loc rs (Z.of_int o) in
+        let@ () =
+          if !cnBV then
+            let o = Option.get (Memory.member_offset decl member) in
+            let rs = Option.get (BT.is_bits_bt Memory.uintptr_bt) in
+            ensure_z_fits_bits_type loc rs (Z.of_int o)
+          else
+            return ()
+        in
         (* looking at solver mapping *)
         return (IT (MemberShift (t, tag, member), BT.Loc (), loc))
       | ArrayShift { base; ct; index } ->
