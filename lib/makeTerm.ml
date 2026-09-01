@@ -432,17 +432,33 @@ let const_of_c_sig (c_sig : Sctypes.c_concrete_sig) loc =
 (* let _non_vip_constraint about loc =  *)
 (*   eq_ (allocId_ about loc, alloc_id_ Z.zero loc) loc *)
 
-(* TODO: are the constraints `0<about` and `about+pointee_size-1 <= max-pointer`
-   required? *)
+(* A good object pointer must cover its complete pointee.  A merely
+   representable pointer only needs its address to be in range; in particular,
+   NULL remains representable. *)
 let value_check_pointer mode ~pointee_ct about loc =
   let good = match mode with `Good -> true | `Representable -> false in
+  let integer_bounds =
+    if BT.(!cnBV) then
+      []
+    else
+      let addr = addr_ about loc in
+      let last_byte_bound =
+        match (mode, pointee_ct) with
+        | `Representable, _ -> []
+        | `Good, (Sctypes.Void | Function _) -> []
+        | `Good, _ ->
+          let last_byte_offset = Z.of_int (Memory.size_of_ctype pointee_ct - 1) in
+          [ le_
+              (add_ (addr, z_ last_byte_offset loc) loc, z_ Memory.max_pointer loc)
+              loc
+          ]
+      in
+      in_z_range addr (Z.zero, Memory.max_pointer) loc :: last_byte_bound
+  in
   and_
     (List.concat
        [ (* if !use_vip then None else Some (non_vip_constraint about loc); *)
-         (if BT.(!cnBV) then
-            []
-          else
-            [ in_z_range (addr_ about loc) (Z.zero, Memory.max_pointer) loc ]);
+         integer_bounds;
          (if good then [ aligned_ (about, pointee_ct) loc ] else [])
        ])
     loc
@@ -456,7 +472,12 @@ let value_check mode (struct_layouts : Memory.struct_decls) ct about loc =
   let rec aux (ct_ : Sctypes.t) about =
     match ct_ with
     | Void -> bool_ true loc
-    | Byte -> if BT.(!cnBV) then bool_ true loc else failwith "todo: Byte value_check"
+    | Byte ->
+      if BT.(!cnBV) then
+        bool_ true loc
+      else
+        let value = cast_ BT.Integer (getOpt_ about loc) loc in
+        impl_ (isSome_ about loc, in_z_range value (Z.zero, Z.of_int 255) loc) loc
     | Integer it ->
       in_z_range about (Memory.min_integer_type it, Memory.max_integer_type it) loc
     | Array (_, None) ->
