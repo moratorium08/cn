@@ -1,177 +1,131 @@
-(* Instantiation of the CN-exported specification
-   using results from the prior theories. *)
+(* Instantiation of the CN-exported specification for arrays/combine.
+   Iterated ownership is [each_resource]: an explicit finite index set with a
+   big separating conjunction, so extending an array by one cell is a
+   [big_sepS_union] with a singleton (plus a re-indexing via [set_map]). *)
 
-Require Import ZArith Bool Lia Coq.ZArith.Znat Coq.Lists.List.
-Require Import CN_Lemmas.Gen_Spec.
-Require Import CN_Lemmas.CN_Lib_Iris.
-Import CN_Lemmas.Gen_Spec.Types.
+From Stdlib Require Import ZArith Lia.
+From stdpp Require Import gmap fin_sets.
 From iris.proofmode Require Import proofmode.
-Require Import iris.base_logic.lib.gen_heap.
-Require Import Coq.Classes.RelationClasses.
+From iris.base_logic Require Import iprop.
+Require Import CN_Lemmas.Gen_Spec.
+Require CN_Lemmas.CN_Lib.
+Import CN_Lemmas.Gen_Spec.Types.
 
-
-
-Module Inst.
-
-  Definition Alloc : (Z * Z) -> Prop := fun x => True.
-  
+Module Inst <: Parameters.
 End Inst.
-
-Module Lemma_Defs := CN_Lemmas.Gen_Spec.Lemma_Defs (Inst).
-
-Module Proofs.
-
-(* now prove lemmas *)
-Import Lemma_Defs Inst.
-Open Scope Z.
-
-Module Defs := CN_Lemmas.Gen_Spec.Defs (Inst).
-Import Defs.
-
-Section Iris_time.
-Context `{!heapGS_gen Σ}.
-Local Notation "⊢ P" := (⊢@{iPropI Σ} P).
-
-Lemma each_lemma : ⊢ each_lemma_type.
-Proof.
-  unfold each_lemma_type.
-  unfold each_int.
-  iIntros (p n v) "H".
-  iIntros (l) "H1 %leq %gte".
-  iExists (v :: l).
-  iSplitL; auto.
-  assert ((Z.to_nat n - Z.to_nat 0)%nat = Z.to_nat n).
-  { lia. }
-  rewrite H.
-  assert (Z.to_nat n ≠ O).
-  { lia. }
-  destruct (Z.to_nat n); auto.
-  iFrame.
-  assert ((Z.to_nat 1) = S (Z.to_nat 0)).
-  { lia. }
-  rewrite H1.
-  unfold each_int.
-  - assert ((S n0 - S (Z.to_nat 0))%nat = n0).
-  { lia. }
-  rewrite H2.
-  iFrame.
-Qed.
-
-Lemma each_concrete2 : ⊢ each_concrete2_type.
-Proof.
-  unfold each_concrete2_type.
-  iIntros (p v) "H".
-  iIntros (L) "H1".
-  iExists (v :: L).
-  simpl.
-  iFrame.
-  destruct L; auto.
-  assert ((arrayshift (arrayshift p 4 1) 4 (Z.to_nat 0)) = (arrayshift p 4 (S (Z.to_nat 0)))).
-  { unfold arrayshift.
-    lia. }
-  rewrite H.
-  iDestruct "H1" as "[H H']".
-  iFrame.
-  assert ((arrayshift (arrayshift p 4 1) 4 (S (Z.to_nat 0))) = arrayshift p 4 (S (S (Z.to_nat 0)))).
-  { unfold arrayshift.
-    lia. }
-  rewrite H0.
-  iFrame.
-Qed.
-  
-Lemma n_obv (n : Z) : (Z.to_nat n - Z.to_nat 0)%nat = Z.to_nat n.
-Proof.
-  lia.
-Qed.
-
-Lemma n_zero_obv (z : Z) (n : nat) : (Z.to_nat z + n - 0)%nat = (Z.to_nat z + n)%nat.
-Proof.
-  lia.
-Qed.
-
-Lemma n_add (n m : Z) (Hn : 0 ≤ n) (Hm : 0 ≤ m) :
-  (Z.to_nat (n + m)) = (Z.to_nat n + Z.to_nat m)%nat.
-Proof.
-  destruct n.
-  - lia.
-  - destruct m.
-    + lia.
-    + rewrite Z2Nat.inj_add; auto.
-    + contradiction.
-  - contradiction.
-Qed.
-
-Lemma each_emp (m n : nat) (p : Ptr) (L : list Z) :
-  each_int m (n - n) p L -∗
-  ⌜L = []⌝.
-Proof.
-  iIntros "H".
-  unfold each_int in *.
-  induction n.
-  - simpl.
-    iDestruct "H" as "[%H _]".
-    rewrite H; auto.
-  - simpl.
-    apply IHn.
-Qed.
-
-Lemma each_shift_concrete (p : Ptr) (x : Z) (L : list Z) :
-  each_int 0 (2%nat) p (L ++ [x]) -∗
-  each_int 0 1%nat p L.
-Proof.
-  iIntros "H".
-  destruct L.
-  - simpl.
-    iDestruct "H" as "[_ %H]".
-    auto.
-  - simpl.
-    iDestruct "H" as "[H' H]".
-    iFrame.
-    destruct L.
-    + simpl; auto.
-    + simpl.
-      iDestruct "H" as "[_ %H]".
-      exfalso.
-      inversion H.
-      induction L.
-      * simpl in H0.
-        inversion H0.
-      * simpl in H0.
-        inversion H0.
-Qed.
-
-Lemma each_concrete : ⊢ each_concrete_type.
-  Proof.
-  unfold each_concrete_type.
-  iIntros (p L) "H".
-  iIntros (v) "H1".
-  iExists (L ++ [v]).
-  rewrite (n_obv).
-  rewrite (n_obv).
-  iSplitL; auto.
-  simpl.
-  destruct L; auto.
-  simpl.
-  iDestruct "H" as "[H H']".
-  iFrame.
-  destruct L; auto.
-  simpl.
-  iDestruct "H'" as "[H' [%H2 _]]".
-  iFrame.
-  rewrite H2.
-  simpl.
-  auto.
-Qed.
-
-(*TODO*)
-End Iris_time.
-End Proofs.
 
 Module InstOK: CN_Lemmas.Gen_Spec.Lemma_Spec(Inst).
 
   Module L := CN_Lemmas.Gen_Spec.Lemma_Defs (Inst).
+  Import L L.D.
+  Open Scope Z_scope.
 
-  Include Proofs.
+  Section Proof.
+    Context {cn_selectors : Selectors} `{!heapGS_gen Σ}.
+    Local Notation "⊢ P" := (⊢@{iPropI Σ} P).
+
+    (* Pointer arithmetic in integer mode: addresses are plain [Z]. *)
+    Lemma shift_add (p : Ptr) (s n m : Z) :
+      arrayshift (arrayshift p s n) s m = arrayshift p s (n + m).
+    Proof.
+      destruct p as [[aid a]|]; unfold arrayshift, ptr_shift, aia,
+        alloc_id_of, raw_address;
+        cbv [address address_Z Address CN_ExportConfig.bitvectors];
+        f_equal; f_equal; lia.
+    Qed.
+
+    Lemma shift_zero (p : Ptr) (s : Z) :
+      Is_true (has_alloc_id p) -> arrayshift p s 0 = p.
+    Proof.
+      destruct p as [[aid a]|]; last (intros []).
+      intros _. unfold arrayshift, ptr_shift, aia, alloc_id_of, raw_address.
+      cbv [address address_Z Address CN_ExportConfig.bitvectors].
+      f_equal; f_equal; lia.
+    Qed.
+
+    Lemma owned_integer_alloc_id n s (p : Ptr) v :
+      Owned_integer n s p v -∗ ⌜Is_true (has_alloc_id p)⌝.
+    Proof.
+      iIntros "H". iDestruct "H" as (bs vs) "[[%Hfoot _] _]". iPureIntro.
+      destruct Hfoot as [[Hp _] _]. rewrite Hp. exact I.
+    Qed.
+
+    Lemma each_lemma : ⊢ each_lemma_type.
+    Proof.
+      iIntros (p n v) "Hv %Halign %Hv".
+      iIntros (A) "[%Hp HA] %_ %HArange %Hn %Hmax".
+      iDestruct "HA" as (indices) "[%Hind HA]".
+      iExists (fun j => if decide (j = 0) then v else A j).
+      iSplitL "Hv HA".
+      - iSplit; first done.
+        iExists ({[0]} ∪ indices). iSplit.
+        { iPureIntro. intros i. rewrite elem_of_union elem_of_singleton Hind. lia. }
+        rewrite big_sepS_union; last first.
+        { apply disjoint_singleton_l. rewrite Hind. lia. }
+        rewrite big_sepS_singleton. iSplitL "Hv".
+        + cbv beta. case_decide; last done. rewrite (shift_zero p 4 Hp). done.
+        + iApply (big_sepS_mono with "HA"). intros i Hi. apply Hind in Hi.
+          cbv beta. case_decide; [lia | done].
+      - iSplit; first done. iSplit.
+        + iIntros (j). iPureIntro. intros Hj.
+          destruct (decide (j = 0)); [lia | apply HArange; lia].
+        + iSplit; last done. iPureIntro. cbv beta. case_decide; [done | lia].
+    Qed.
+
+    Lemma each_concrete : ⊢ each_concrete_type.
+    Proof.
+      iIntros (p A) "[%Hp HA] %Halign %HArange".
+      iIntros (v) "Hv %Halign2 %Hv".
+      iDestruct "HA" as (indices) "[%Hind HA]".
+      iExists (fun j => if decide (j = 2) then v else A j).
+      iSplitL "Hv HA".
+      - iSplit; first done.
+        iExists (indices ∪ {[2]}). iSplit.
+        { iPureIntro. intros i. rewrite elem_of_union elem_of_singleton Hind. lia. }
+        rewrite big_sepS_union; last first.
+        { apply disjoint_singleton_r. rewrite Hind. lia. }
+        rewrite big_sepS_singleton. iSplitL "HA".
+        + iApply (big_sepS_mono with "HA"). intros i Hi. apply Hind in Hi.
+          cbv beta. case_decide; [lia | done].
+        + cbv beta. case_decide; [done | lia].
+      - iSplit; first done. iSplit; last done.
+        iIntros (j). iPureIntro. intros Hj.
+        destruct (decide (j = 2)); [lia | apply HArange; lia].
+    Qed.
+
+    Lemma each_concrete2 : ⊢ each_concrete2_type.
+    Proof.
+      iIntros (p v) "Hv %Halign %Hv".
+      iIntros (A) "[%Hp1 HA] %Halign1 %HArange".
+      iDestruct "HA" as (indices) "[%Hind HA]".
+      iDestruct (owned_integer_alloc_id with "Hv") as %Hp.
+      iExists (fun j => if decide (j = 0) then v else A (j - 1)).
+      iSplitL "Hv HA".
+      - iSplit; first done.
+        iExists ({[0]} ∪ set_map (Z.add 1) indices). iSplit.
+        { iPureIntro. intros i.
+          rewrite elem_of_union elem_of_singleton elem_of_map. split.
+          - intros [-> | (j & -> & Hj)]; [lia | apply Hind in Hj; lia].
+          - intros Hi. destruct (decide (i = 0)) as [-> | Hne]; [left; done | right].
+            exists (i - 1). rewrite Hind. split; lia. }
+        rewrite big_sepS_union; last first.
+        { apply disjoint_singleton_l. rewrite elem_of_map.
+          intros (j & Hj & Hj'). apply Hind in Hj'. lia. }
+        rewrite big_sepS_singleton. iSplitL "Hv".
+        + cbv beta. case_decide; last done. rewrite (shift_zero p 4 Hp). done.
+        + assert (Inj (=) (=) (Z.add 1)) as Hinj by (intros i j Hij; lia).
+          rewrite (big_opS_set_map (o:=bi_sep) (Z.add 1) indices _ Hinj).
+          iApply (big_sepS_mono with "HA"). intros i Hi. apply Hind in Hi.
+          rewrite shift_add. case_decide; first lia.
+          replace (1 + i - 1) with i by lia. done.
+      - iSplit; first done. iSplit; last done.
+        iIntros (j). iPureIntro. intros Hj.
+        destruct (decide (j = 0)); [lia | apply HArange; lia].
+    Qed.
+  End Proof.
 
 End InstOK.
 
+Print Assumptions InstOK.each_lemma.
+Print Assumptions InstOK.each_concrete.
+Print Assumptions InstOK.each_concrete2.

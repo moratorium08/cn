@@ -1,5 +1,6 @@
 Require Import ZArith Bool.
-Require Import CN_Lemmas.Gen_Spec CN_Lemmas.CN_Lib_Iris.
+Require Import CN_Lemmas.Gen_Spec.
+From iris.base_logic.lib Require Import iprop.
 From iris.proofmode Require Import proofmode.
 
 Module Types := CN_Lemmas.Gen_Spec.Types.
@@ -15,7 +16,7 @@ Module InstOK : CN_Lemmas.Gen_Spec.Lemma_Spec (Inst).
   Open Scope Z.
 
   Section Proof.
-  Context `{!heapGS_gen Σ}.
+  Context {cn_selectors : Selectors} `{!heapGS_gen Σ}.
 
   Local Notation "⊢ P" := (⊢@{iPropI Σ} P).
 
@@ -31,25 +32,26 @@ Module InstOK : CN_Lemmas.Gen_Spec.Lemma_Spec (Inst).
       iIntros (suffix') "Hsuffix'".
       iDestruct "Hbody" as "[Hnil | Hcons]".
       - iDestruct "Hnil" as "[%Hpq _]".
-        unfold Preds.D.ptr_eq in Hpq.
-        apply Is_true_eq_true in Hpq.
-        apply Z.eqb_eq in Hpq.
+        unfold Preds.D.ptr_eq, CN_Lib_Iris.Memory.ptr_eq in Hpq.
+        apply bool_decide_unpack in Hpq.
         subst q'.
         iExists suffix'.
         iFrame.
       - iDestruct "Hcons" as "[_ Hcons]".
         iDestruct "Hcons" as "[_ Hcons]".
         iDestruct "Hcons" as "[%Hp_nonnull Hnodes]".
-        iDestruct "Hnodes" as (node) "[Hnode Htail]".
+        iDestruct "Hnodes" as (node) "[Hnode [%Haddr [%Hvals Htail]]]".
         iDestruct "Htail" as (tail) "[IH _]".
         iDestruct ("IH" with "Hsuffix'") as (whole_tail) "Htail".
-        iExists (Cons (Types.value node) whole_tail).
+        iExists (Cons (Types.list__value node) whole_tail).
         iApply List_unfold.
         iRight.
         iSplit; first done.
         iSplit; first done.
         iExists node.
         iSplitL "Hnode"; first iExact "Hnode".
+        iSplit; first done.
+        iSplit; first done.
         iExists whole_tail.
         iFrame.
         done. }

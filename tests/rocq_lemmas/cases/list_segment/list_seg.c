@@ -6,7 +6,7 @@ struct list {
 /*@
 datatype list_cn {
   Nil {},
-  Cons {i32 head, datatype list_cn tail}
+  Cons {integer head, datatype list_cn tail}
 }
 
 predicate [rec] (datatype list_cn) ListSeg(pointer p, pointer q) {

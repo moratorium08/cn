@@ -15,10 +15,10 @@ void do_nothing (struct point *p)
 int read (int *p)
 /*@ requires 
       take P = Owned<int>(p);
-      (i32) P == 0i32;
+      P == 0;
   ensures 
       take Q = Owned<int>(p);
-      (i32) Q == 0i32;
+      Q == 0;
 @*/
 {
   /*@ apply resource_lemma (p); @*/

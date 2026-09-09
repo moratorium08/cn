@@ -1,5 +1,5 @@
 /*@
-lemma pop_lemma (pointer front, pointer back, i32 x)
+lemma pop_lemma (pointer front, pointer back, integer x)
   requires
       take Q = QueueAux(front, back);
       take B = Owned<struct queue_cell>(back);
