@@ -7,23 +7,7 @@ module CC = Cn_to_coq
 
 let ret_sym = "ν"
 
-(* CN identifiers are printed verbatim, so a CN variable such as [end] or [Z]
-   would be a Rocq keyword or shadow a name the generated modules rely on.
-   Such names get a trailing underscore. *)
-let rocq_reserved =
-  StringSet.of_list
-    [ "_"; "Axiom"; "CoFixpoint"; "Definition"; "Fixpoint"; "Hypothesis"; "Parameter";
-      "Prop"; "SProp"; "Set"; "Theorem"; "Type"; "Variable"; "as"; "at"; "by"; "cofix";
-      "discriminated"; "else"; "end"; "exists"; "exists2"; "fix"; "for"; "forall"; "fun";
-      "if"; "in"; "let"; "match"; "mod"; "return"; "then"; "using"; "where"; "with";
-      "Z"; "N"; "nat"; "bool"; "list"; "option"; "unit"; "Some"; "None"; "true"; "false";
-      "tt"; "fst"; "snd"; "O"; "S"; "Ptr"; "iProp"; "emp"; "Types"; "Defs"; "P"; "D"; "R";
-      "L"; "CN_Lib"; "CN_Lib_Iris"; "CN_Memory"; "Memory"; "Selectors"; "Σ" ]
-
-let rocq_name (name : string) =
-  if StringSet.mem name rocq_reserved then name ^ "_" else name
-
-let sym_string sym = rocq_name (Sym.pp_string sym)
+let sym_string sym = CI.rocq_sym sym
 
 let pp_sym sym = Pp.string (sym_string sym)
 

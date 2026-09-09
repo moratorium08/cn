@@ -332,7 +332,7 @@ let owned_name (ct : Sctypes.t) =
     "(Owned_integer " ^ string_of_int (Memory.size_of_ctype ct) ^ "%nat "
     ^ string_of_bool (Memory.is_signed_integer_type ity) ^ ")"
   | Pointer _ -> "Owned_pointer"
-  | Struct nm -> "Owned_" ^ Sym.pp_string nm
+  | Struct nm -> "Owned_" ^ CI.rocq_sym nm
   | _ -> "Unsupported primitive ownership (byte/array/function)"
 
 let scalar_resource gl nm ct init ptr =
