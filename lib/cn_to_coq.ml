@@ -243,11 +243,13 @@ let it_to_itp_ir global it b =
       let tag = BaseTypes.struct_bt (Terms.Normal.get_bt t) in
       let mems, _bts = get_struct_xs global.struct_decls tag in
       let ix = find_tuple_element Id.equal m mems in
+      let m = Id.make (Id.get_loc m) (CI.struct_field_name tag m) in
       CI.ITP_structmember (aux t, CI.ITP_id m, ix)
     | Terms.StructUpdate ((t, m), x) ->
       let tag = BaseTypes.struct_bt (Terms.Normal.get_bt t) in
       let mems, _bts = get_struct_xs global.struct_decls tag in
       let ix = find_tuple_element Id.equal m mems in
+      let m = Id.make (Id.get_loc m) (CI.struct_field_name tag m) in
       CI.ITP_structupdate ((aux t, CI.ITP_id m), aux x, ix)
     | Terms.Cast (cbt, t) ->
       let comp = Some (it, "cast operand") in

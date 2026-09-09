@@ -7,6 +7,26 @@ module CC = Cn_to_coq
 
 let ret_sym = "ν"
 
+(* CN identifiers are printed verbatim, so a CN variable such as [end] or [Z]
+   would be a Rocq keyword or shadow a name the generated modules rely on.
+   Such names get a trailing underscore. *)
+let rocq_reserved =
+  StringSet.of_list
+    [ "_"; "Axiom"; "CoFixpoint"; "Definition"; "Fixpoint"; "Hypothesis"; "Parameter";
+      "Prop"; "SProp"; "Set"; "Theorem"; "Type"; "Variable"; "as"; "at"; "by"; "cofix";
+      "discriminated"; "else"; "end"; "exists"; "exists2"; "fix"; "for"; "forall"; "fun";
+      "if"; "in"; "let"; "match"; "mod"; "return"; "then"; "using"; "where"; "with";
+      "Z"; "N"; "nat"; "bool"; "list"; "option"; "unit"; "Some"; "None"; "true"; "false";
+      "tt"; "fst"; "snd"; "O"; "S"; "Ptr"; "iProp"; "emp"; "Types"; "Defs"; "P"; "D"; "R";
+      "L"; "CN_Lib"; "CN_Lib_Iris"; "CN_Memory"; "Memory"; "Selectors"; "Σ" ]
+
+let rocq_name (name : string) =
+  if StringSet.mem name rocq_reserved then name ^ "_" else name
+
+let sym_string sym = rocq_name (Sym.pp_string sym)
+
+let pp_sym sym = Pp.string (sym_string sym)
+
 (* Printing headers for each module in the ITP file *)
 
 let parse_directions directions = (directions, StringSet.singleton "all")
@@ -123,7 +143,7 @@ let mod_spec lemma_nms =
   let open Pp in
   let lemma nm =
     !^"  Parameter"
-    ^^^ typ (Sym.pp nm) (!^"⊢ " ^^ Sym.pp nm ^^ !^"_type")
+    ^^^ typ (pp_sym nm) (!^"⊢ " ^^ pp_sym nm ^^ !^"_type")
     ^^ !^"."
     ^^ hardline
   in
@@ -219,7 +239,7 @@ let print_ctype (ctyp : Sctypes.t) =
   | Integer _ -> "Z"
   | Array _ -> "unsupported ctype array"
   | Pointer _ -> "Ptr"
-  | Struct s -> Sym.pp_string s
+  | Struct s -> sym_string s
   | Function _ -> "unsupported ctype function"
   | Byte -> "unsupported ctype function" (* TODO(HK): added for plumbing *)
 
@@ -283,12 +303,12 @@ let rec bt_to_itp (bt : CI.itp_bt) =
     let enc_x = bt_to_itp x in
     let enc_y = bt_to_itp y in
     parens (binop "->" enc_x enc_y)
-  | CI.ITP_Struct (CI.ITP_sym tag, _) -> Sym.pp tag
+  | CI.ITP_Struct (CI.ITP_sym tag, _) -> pp_sym tag
   | CI.ITP_Record mems ->
     let enc_mem_bts = List.map bt_to_itp mems in
     tuple_itp_ty !^"record" enc_mem_bts
   | CI.ITP_Loc -> !^"Ptr"
-  | CI.ITP_Datatype (CI.ITP_sym tag) -> Sym.pp tag
+  | CI.ITP_Datatype (CI.ITP_sym tag) -> pp_sym tag
   | CI.ITP_List _bt2 -> !^"list " ^^ bt_to_itp _bt2
   | CI.ITP_Unit -> !^"unit"
   | CI.ITP_Membyte -> !^"unsupported BT membyte"
@@ -304,12 +324,12 @@ let rec bt_to_itp (bt : CI.itp_bt) =
 (* Let and forall occur in both pure and resource terms*)
 let pp_let sym rhs_doc doc =
   let open Pp in
-  !^"let" ^^^ Sym.pp sym ^^^ !^":=" ^^^ rhs_doc ^^^ !^"in" ^^^ doc
+  !^"let" ^^^ pp_sym sym ^^^ !^":=" ^^^ rhs_doc ^^^ !^"in" ^^^ doc
 
 
 let pp_forall (sym : Sym.t) (bt : CI.itp_bt) (doc : Pp.document) =
   let open Pp in
-  !^"∀" ^^^ parens (typ (Sym.pp sym) (bt_to_itp bt)) ^^ !^"," ^^ break 1 ^^ doc
+  !^"∀" ^^^ parens (typ (pp_sym sym) (bt_to_itp bt)) ^^ !^"," ^^ break 1 ^^ doc
 
 
 let norm_bv_op bt doc_f =
@@ -327,10 +347,10 @@ let norm_bv_op bt doc_f =
 
 let rec pat_to_itp (pat : CI.itp_pat) =
   match pat with
-  | ITP_pSym (ITP_sym sym) -> Sym.pp sym
+  | ITP_pSym (ITP_sym sym) -> pp_sym sym
   | ITP_pWild -> rets "_"
   | ITP_pConstructor (ITP_sym s, l) ->
-    parensM (build ([ Sym.pp s ] @ List.map pat_to_itp l))
+    parensM (build ([ pp_sym s ] @ List.map pat_to_itp l))
 
 
 let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
@@ -339,7 +359,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     let aux t = f global t in
     let abinop s x y = parensM (build [ aux x; rets s; aux y ]) in
     match t with
-    | CI.ITP_sym_term (CI.ITP_sym s) -> Sym.pp s
+    | CI.ITP_sym_term (CI.ITP_sym s) -> pp_sym s
     | ITP_const c ->
       (match c with
        | ITP_bool b -> rets (if b then "true" else "false")
@@ -418,8 +438,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
              "->"
              (binop
                 "/\\"
-                (binop "<=" (Pp.int i1) (Sym.pp s))
-                (binop "<=" (Sym.pp s) (Pp.int i2)))
+                (binop "<=" (Pp.int i1) (pp_sym s))
+                (binop "<=" (pp_sym s) (Pp.int i2)))
              (aux x))
       in
       parens enc
@@ -435,6 +455,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
       let xs = List.map aux l in
       parensM (flow (comma ^^ break 1) xs)
     | CI.ITP_structmember (t, CI.ITP_id fieldnm, _) ->
+      (* field names arrive already qualified by CI.struct_field_name *)
       aux t ^^ !^"." ^^ parens !^(Id.get_string fieldnm)
     | CI.ITP_structupdate ((t, _), x, ix) ->
       let op_nm = gen_get_upd ix (aux t) in
@@ -444,14 +465,14 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
        target range; casts to CN integers are the identity. *)
     | CI.ITP_cast (bt, x) -> norm_bv_op bt (aux x)
     | CI.ITP_apply (CI.ITP_sym name, args) ->
-      parensM (build ([ Sym.pp name ] @ List.map aux args))
+      parensM (build ([ pp_sym name ] @ List.map aux args))
     | CI.ITP_apply_prop (CI.ITP_sym name, args) ->
-      parensM (build ([ Sym.pp name ] @ List.map aux args))
+      parensM (build ([ pp_sym name ] @ List.map aux args))
     | CI.ITP_representable (CI.ITP_sym s, _, t) ->
-      let op_nm = "representable_" ^ Sym.pp_string s in
+      let op_nm = "representable_" ^ sym_string s in
       parensM (build [ rets op_nm; aux t ])
     | CI.ITP_constructor (CI.ITP_sym name, args) ->
-      parensM (build ([ Sym.pp name ] @ List.map aux args))
+      parensM (build ([ pp_sym name ] @ List.map aux args))
     | CI.ITP_nthlist (n, xs, d) ->
       parensM (build [ rets "CN_Lib.nth_list_z"; aux n; aux xs; aux d ])
     | CI.ITP_arraytolist (arr, i, len) ->
@@ -484,43 +505,43 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
   | CI.ITP_Let_Resource (CI.ITP_sym nm, x, y) -> parensM (pp_let nm (aux x) (aux' y))
   | CI.ITP_Forall (CI.ITP_sym sym, bt, t) -> pp_forall sym bt (aux' t)
   | CI.ITP_Exists (CI.ITP_sym sym, bt, t) ->
-    !^"∃" ^^^ parens (typ (Sym.pp sym) (bt_to_itp bt)) ^^ !^"," ^^ break 1 ^^ aux' t
+    !^"∃" ^^^ parens (typ (pp_sym sym) (bt_to_itp bt)) ^^ !^"," ^^ break 1 ^^ aux' t
   | CI.ITP_Star (t1, t2) -> mk_star (parens (aux' t1)) (parens (aux' t2))
   | CI.ITP_Wand (t1, t2) -> mk_wand (parens (aux' t1)) (parens (aux' t2))
   | CI.ITP_Pure t -> iris_pure (aux t)
   | CI.ITP_Define (CI.ITP_sym sym, x, y) -> map_split (pp_let sym (aux x)) (aux' y)
   | CI.ITP_Empty_Heap -> rets "emp"
   | CI.ITP_scalar (name, ptr, CI.ITP_sym value) ->
-    build [rets name; aux ptr; Sym.pp value]
+    build [rets name; aux ptr; pp_sym value]
   | CI.ITP_owned_value (name, ptr, value) ->
     build [rets name; aux ptr; parens (aux value)]
   | CI.ITP_block_sized (size, ptr) ->
     build [rets "BlockSized"; rets (string_of_int size ^ "%nat"); aux ptr]
   | CI.ITP_each_resource (CI.ITP_sym index, permission, body) ->
     let lambda value =
-      parens (rets "fun" ^^^ Sym.pp index ^^^ rets ": Z =>" ^^^ value)
+      parens (rets "fun" ^^^ pp_sym index ^^^ rets ": Z =>" ^^^ value)
     in
     build
       [ rets "each_resource";
         lambda (parens (parens (aux permission) ^^ rets "%Z") ^^ rets "%type");
         lambda (aux' body) ]
   | CI.ITP_Block (CI.ITP_sym s, _, t, _) ->
-    let op_nm = "Block_" ^ Sym.pp_string s in
+    let op_nm = "Block_" ^ sym_string s in
     parensM (build [ rets op_nm; aux' t ])
   | CI.ITP_Owned (op_nm, ptr, CI.ITP_sym rt, t) ->
-    build [ rets op_nm; aux ptr; rets (Sym.pp_string rt); aux' t ]
+    build [ rets op_nm; aux ptr; rets (sym_string rt); aux' t ]
   | CI.ITP_PName (CI.ITP_sym nm, CI.ITP_sym pname, iargs, ptr) ->
     let args = List.map aux iargs in
-    build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])
+    build ((pp_sym pname :: aux ptr :: args) @ [ pp_sym nm ])
   | CI.ITP_Good -> rets ""
   | CI.ITP_Unsupported_Resource msg -> rets msg
 
 
 let convert_lemma_defs global (lemmas : CI.itp_lemma list) =
   let lemma_ty (CI.ITP_lemma (CI.ITP_sym nm, tm)) =
-    Pp.progress_simple "converting lemma type" (Sym.pp_string nm);
+    Pp.progress_simple "converting lemma type" (sym_string nm);
     let rhs = resource_to_itp global tm in
-    defn (Sym.pp_string nm ^ "_type") [] (Some (Pp.string "iProp Σ")) rhs false
+    defn (sym_string nm ^ "_type") [] (Some (Pp.string "iProp Σ")) rhs false
   in
   let tys = List.map lemma_ty lemmas in
   tys
@@ -528,19 +549,20 @@ let convert_lemma_defs global (lemmas : CI.itp_lemma list) =
 
 let generate_structs (struct_decls : Memory.struct_decls) =
   let open Pp in
-  let get_struct_field (piece : Memory.struct_piece) =
+  let get_struct_field tag (piece : Memory.struct_piece) =
     match piece.member_or_padding with
     | Some (id, ctype) ->
-      !^("  " ^ Id.get_string id ^ " : " ^ print_ctype ctype ^ "; ") ^^ hardline
+      !^("  " ^ CI.struct_field_name tag id ^ " : " ^ print_ctype ctype ^ "; ")
+      ^^ hardline
     | None -> rets ""
   in
   let unpack_struct_type (decl : Sym.t * Memory.struct_layout) =
-    let nm = !^(Sym.pp_string (fst decl)) in
+    let nm = !^(sym_string (fst decl)) in
     !^"  Record "
     ^^ nm
     ^^ !^" : Type := { "
     ^^ hardline
-    ^^ build (List.map get_struct_field (snd decl))
+    ^^ build (List.map (get_struct_field (fst decl)) (snd decl))
     ^^ !^" }."
   in
   List.map unpack_struct_type (Sym.Map.bindings struct_decls)
@@ -551,11 +573,11 @@ let translate_datatypes (dtys : CI.itp_dt list list) =
   let open Pp in
   let cons_line dt_tag (CI.ITP_constr (CI.ITP_sym nm, params)) =
     let argTs = List.map (fun bt -> bt_to_itp bt) params in
-    !^"    | " ^^ Sym.pp nm ^^^ colon ^^^ flow !^" -> " (argTs @ [ Sym.pp dt_tag ])
+    !^"    | " ^^ pp_sym nm ^^^ colon ^^^ flow !^" -> " (argTs @ [ pp_sym dt_tag ])
   in
   let dt_eqs (CI.ITP_dt (CI.ITP_sym nm, _, constr)) =
     let c_lines = List.map (cons_line nm) constr in
-    !^"    " ^^ Sym.pp nm ^^^ colon ^^^ !^"Type :=" ^^ hardline ^^ flow hardline c_lines
+    !^"    " ^^ pp_sym nm ^^^ colon ^^^ !^"Type :=" ^^ hardline ^^ flow hardline c_lines
   in
   let print_dt dty_clump =
     flow
@@ -618,31 +640,31 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
     List.map clause_to_itp (scanl1 clause_concat clauses)
   in
   let make_one_arg = function
-    | CI.ITP_sym id, bt -> parens (typ (Sym.pp id) (bt_to_itp bt))
+    | CI.ITP_sym id, bt -> parens (typ (pp_sym id) (bt_to_itp bt))
   in
   let unpack_sym (CI.ITP_sym sym) = sym in
   let get_pred_name (pred : CI.itp_resource_pred) = unpack_sym pred.CI.name in
   let make_formal_args (pred : CI.itp_resource_pred) =
     let ptr = unpack_sym pred.CI.ptr in
-    let ptr_arg = parens (typ (Sym.pp ptr) (bt_to_itp CI.ITP_Loc)) in
+    let ptr_arg = parens (typ (pp_sym ptr) (bt_to_itp CI.ITP_Loc)) in
     let ret_arg = parens (typ !^ret_sym (bt_to_itp pred.CI.ret_bt)) in
     (ptr_arg :: List.map make_one_arg pred.CI.args) @ [ ret_arg ]
   in
   let make_actual_args (pred : CI.itp_resource_pred) =
     let ptr = unpack_sym pred.CI.ptr in
-    let args = List.map (fun (arg, _) -> Sym.pp (unpack_sym arg)) pred.CI.args in
-    (Sym.pp ptr :: args) @ [ !^ret_sym ]
+    let args = List.map (fun (arg, _) -> pp_sym (unpack_sym arg)) pred.CI.args in
+    (pp_sym ptr :: args) @ [ !^ret_sym ]
   in
   let make_args (group : CI.itp_resource_pred_group) (pred : CI.itp_resource_pred) =
     let make_rec_arg (arg : CI.itp_resource_pred) =
       let ty = make_pred_ty arg.args arg.ret_bt "iProp Σ" in
-      parens (typ (Sym.pp (get_pred_name arg)) ty)
+      parens (typ (pp_sym (get_pred_name arg)) ty)
     in
     let rec_args = List.map make_rec_arg group in
     rec_args @ make_formal_args pred
   in
   let get_body_name (pred : CI.itp_resource_pred) =
-    Sym.pp_string (get_pred_name pred) ^ "_body"
+    sym_string (get_pred_name pred) ^ "_body"
   in
   let unpack_body (group : CI.itp_resource_pred_group) (pred : CI.itp_resource_pred) =
     defn
@@ -653,7 +675,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
       false
   in
   let get_constr_name (pred : CI.itp_resource_pred) =
-    "CN_GROUP_" ^ Sym.pp_string (get_pred_name pred)
+    "CN_GROUP_" ^ sym_string (get_pred_name pred)
   in
   let get_group_type_name index = "cn_predicate_group_" ^ string_of_int index in
   let make_constr type_name pred =
@@ -764,7 +786,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
       build
         [ !^"bi_least_fixpoint"; !^(get_pre_fixpoint_name index); parens @@ build app ]
     in
-    defn (Sym.pp_string (get_pred_name pred)) args (Some !^"iProp Σ") body false
+    defn (sym_string (get_pred_name pred)) args (Some !^"iProp Σ") body false
   in
   let make_fixpoints index (predicates : CI.itp_resource_pred_group) =
     let pre_fixpoint = make_pre_fixpoint index predicates in
@@ -773,7 +795,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
   in
   (* induction lemma *)
   let get_pred_prop_name (pred : CI.itp_resource_pred) =
-    "Φ_" ^ Sym.pp_string (get_pred_name pred)
+    "Φ_" ^ sym_string (get_pred_name pred)
   in
   let make_induction_lemma_arg (pred : CI.itp_resource_pred) =
     let ty = make_pred_ty pred.args pred.ret_bt "iProp Σ" in
@@ -786,10 +808,10 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
   in
   let get_pred_vars (pred : CI.itp_resource_pred) =
     let vars =
-      List.map (fun (CI.ITP_sym sym, bt) -> (Sym.pp sym, bt)) pred.args
+      List.map (fun (CI.ITP_sym sym, bt) -> (pp_sym sym, bt)) pred.args
       @ [ (!^ret_sym, pred.ret_bt) ]
     in
-    (Sym.pp (unpack_sym pred.ptr), CI.ITP_Loc) :: vars
+    (pp_sym (unpack_sym pred.ptr), CI.ITP_Loc) :: vars
   in
   let make_lemma proof_name args statement proof =
     let s =
@@ -844,7 +866,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
       (* (∀ (p : Ptr) (ν : forest), IsForest p ν -∗ Φ_IsForest p ν) *)
       let vars = get_pred_vars pred in
       let body1 =
-        parensM @@ build @@ (Sym.pp (get_pred_name pred) :: List.map fst vars)
+        parensM @@ build @@ (pp_sym (get_pred_name pred) :: List.map fst vars)
       in
       let body2 =
         parensM @@ build @@ (!^(get_pred_prop_name pred) :: List.map fst vars)
@@ -888,7 +910,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
           (fun p ->
              !^"iApply"
              ^^^ parens
-                   (!^"\"" ^^ !^"H_" ^^ Sym.pp (get_pred_name p) ^^ !^"\" with \"Hbody\""))
+                   (!^"\"" ^^ !^"H_" ^^ pp_sym (get_pred_name p) ^^ !^"\" with \"Hbody\""))
           predicates
       in
       let body = flow (hardline ^^ bar ^^ space) cases in
@@ -902,11 +924,11 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
              (!^"unfold"
               ^^^ separate
                     (comma ^^ space)
-                    (List.map (fun p -> Sym.pp (get_pred_name p)) predicates))
+                    (List.map (fun p -> pp_sym (get_pred_name p)) predicates))
         ^^ dot
       in
       !^"iIntros \""
-      ^^ build (List.map (fun p -> !^"#H_" ^^ Sym.pp (get_pred_name p)) predicates)
+      ^^ build (List.map (fun p -> !^"#H_" ^^ pp_sym (get_pred_name p)) predicates)
       ^^ !^"\""
       ^^ dot
       ^^^ hardline
@@ -918,7 +940,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
       make_induction_lemma_statement predicates |> unfold_predicate_bodies predicates
     in
     let proof = make_induction_lemma_proof index predicates in
-    let names = List.map (fun p -> Sym.pp (get_pred_name p)) predicates in
+    let names = List.map (fun p -> pp_sym (get_pred_name p)) predicates in
     let proof_name = separate underscore names ^^ underscore ^^ !^"induction" in
     make_lemma proof_name args statement proof
   in
@@ -927,24 +949,24 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
         (predicates : CI.itp_resource_pred_group)
         (pred : CI.itp_resource_pred)
     =
-    let proof_name = Sym.pp (get_pred_name pred) ^^ underscore ^^ !^"unfold" in
+    let proof_name = pp_sym (get_pred_name pred) ^^ underscore ^^ !^"unfold" in
     let args = get_pred_vars pred in
     (* IsForest p ν ⊣⊢ IsForest_body IsForest IsTree p ν. *)
     let statement =
       let body1 =
-        parensM @@ build @@ (Sym.pp (get_pred_name pred) :: List.map fst args)
+        parensM @@ build @@ (pp_sym (get_pred_name pred) :: List.map fst args)
       in
       let body2 =
         parensM
         @@ build
         @@ (!^(get_body_name pred)
-            :: List.map (fun p -> Sym.pp (get_pred_name p)) predicates)
+            :: List.map (fun p -> pp_sym (get_pred_name p)) predicates)
         @ List.map fst args
       in
       infix 2 1 !^"⊣⊢" body1 body2 |> unfold_predicate_bodies [ pred ]
     in
     let proof =
-      let rewrites = List.map (fun p -> !^"/" ^^ Sym.pp (get_pred_name p)) predicates in
+      let rewrites = List.map (fun p -> !^"/" ^^ pp_sym (get_pred_name p)) predicates in
       let rem =
         [ "least_fixpoint_unfold"; "/" ^ get_pre_fixpoint_name index; "/="; "//" ]
       in
@@ -958,7 +980,7 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
   in
   let make_opaque (predicates : CI.itp_resource_pred_group) =
     !^"Global Opaque"
-    ^^^ build (List.map (fun pred -> Sym.pp (get_pred_name pred)) predicates)
+    ^^^ build (List.map (fun pred -> pp_sym (get_pred_name pred)) predicates)
     ^^ dot
     ^^ hardline
   in
@@ -980,7 +1002,7 @@ let translate_uninterp_pred =
   List.filter_map (fun (CI.ITP_sym nm, _, args, ret_ty) ->
     if Sym.equal nm Alloc.Predicate.sym then None else
     let ty = make_pred_ty args ret_ty "iProp Σ" in
-    Some ((!^"  Parameter" ^^^ typ (Sym.pp nm) ty ^^ !^"." ^^ hardline) ^^ hardline))
+    Some ((!^"  Parameter" ^^^ typ (pp_sym nm) ty ^^ !^"." ^^ hardline) ^^ hardline))
 
 
 (* translate functions to ITP *)
@@ -996,20 +1018,20 @@ let translate_fun (gl : Global.t) (funs : CI.itp_fun list list * CI.itp_fun list
            List.map
              (fun (CI.ITP_sym arg, bt) ->
                 let itp_bt = bt_to_itp bt in
-                Pp.parens (Pp.typ (Sym.pp arg) itp_bt))
+                Pp.parens (Pp.typ (pp_sym arg) itp_bt))
              args
          in
-         defn (Sym.pp_string nm) itp_args None itp_body false
+         defn (sym_string nm) itp_args None itp_body false
        | CI.ITP_recdef body ->
          let itp_body = term_to_itp gl body in
          let itp_args =
            List.map
              (fun (CI.ITP_sym arg, bt) ->
                 let itp_bt = bt_to_itp bt in
-                Pp.parens (Pp.typ (Sym.pp arg) itp_bt))
+                Pp.parens (Pp.typ (pp_sym arg) itp_bt))
              args
          in
-         defn (Sym.pp_string nm) itp_args None itp_body true)
+         defn (sym_string nm) itp_args None itp_body true)
     | CI.ITP_fun_uninterp (CI.ITP_sym nm, logical_fun, args, ret_typ) ->
       (match logical_fun with
        | CI.ITP_uninterp ->
@@ -1018,14 +1040,14 @@ let translate_fun (gl : Global.t) (funs : CI.itp_fun list list * CI.itp_fun list
          let ty =
            List.fold_right (fun at rt -> at ^^^ !^"->" ^^^ rt) itp_arg_typs itp_rt
          in
-         !^"  Parameter" ^^^ typ (Sym.pp nm) ty ^^ !^"." ^^ hardline
+         !^"  Parameter" ^^^ typ (pp_sym nm) ty ^^ !^"." ^^ hardline
        | CI.ITP_uninterp_prop ->
          let itp_arg_typs = List.map (fun (_, bt) -> bt_to_itp bt) args in
          let itp_rt = !^"Prop" in
          let ty =
            List.fold_right (fun at rt -> at ^^^ !^"->" ^^^ rt) itp_arg_typs itp_rt
          in
-         !^"  Parameter" ^^^ typ (Sym.pp nm) ty ^^ !^"." ^^ hardline)
+         !^"  Parameter" ^^^ typ (pp_sym nm) ty ^^ !^"." ^^ hardline)
   in
   let print clump =
     flow
@@ -1040,7 +1062,7 @@ let translate_fun (gl : Global.t) (funs : CI.itp_fun list list * CI.itp_fun list
 (* generate records and Owned_Structname predicates for all structs*)
 let translate_own_structs (struct_decls : Memory.struct_decls) =
   let open Pp in
-  let piece_to_owned (piece : Memory.struct_piece) =
+  let piece_to_owned tag (piece : Memory.struct_piece) =
     let make_owned (nm : string) (id : Id.t) =
       !^(nm ^ " ")
       ^^ parens
@@ -1049,7 +1071,7 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
               ^ " "
               ^ string_of_int piece.size)
       ^^ !^" v."
-      ^^ parens !^(Id.get_string id)
+      ^^ parens !^(CI.struct_field_name tag id)
     in
     match piece.member_or_padding with
     | Some (id, ctyp) ->
@@ -1059,7 +1081,7 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
        | Array _ -> rets "unsupported ctype array"
        (* todo: probably not right? *)
        | Pointer _ -> make_owned "Owned_pointer" id
-       | Struct s -> make_owned ("Owned_" ^ Sym.pp_string s) id
+       | Struct s -> make_owned ("Owned_" ^ sym_string s) id
        | Function _ -> rets "unsupported ctype function"
        | Byte -> rets "unsupported ctype function")
       (* TODO(HK): added for plumbing *)
@@ -1068,14 +1090,14 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
       ^^ parens (!^"arrayshift " ^^ !^"l " ^^ !^(string_of_int piece.offset) ^^ !^" 1")
       ^^ !^(" " ^ string_of_int piece.size)
   in
-  let rec decl_to_pieces (pieces : Memory.struct_piece list) =
+  let rec decl_to_pieces tag (pieces : Memory.struct_piece list) =
     match pieces with
     | [] -> rets ""
-    | x :: [] -> piece_to_owned x ^^ !^"."
-    | x :: xs -> piece_to_owned x ^^ !^" ∗ " ^^ decl_to_pieces xs
+    | x :: [] -> piece_to_owned tag x ^^ !^"."
+    | x :: xs -> piece_to_owned tag x ^^ !^" ∗ " ^^ decl_to_pieces tag xs
   in
   let unpack_decls (decl : Sym.t * Memory.struct_layout) =
-    let nm = !^(Sym.pp_string (fst decl)) in
+    let nm = !^(sym_string (fst decl)) in
     !^"  Definition "
     ^^ !^"Owned_"
     ^^ nm
@@ -1085,7 +1107,7 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
     ^^ !^"⌜footprint_ok allocation_history l "
     ^^ !^(string_of_int (Memory.size_of_ctype (Sctypes.Struct (fst decl))))
     ^^ !^"⌝ ∗ "
-    ^^ decl_to_pieces (snd decl)
+    ^^ decl_to_pieces (fst decl) (snd decl)
     ^^ hardline
   in
   List.map unpack_decls (Sym.Map.bindings struct_decls)
@@ -1126,13 +1148,17 @@ let generate (global : Global.t) directions (lemmata : (Sym.t * (Loc.t * AT.lemm
        opening the output, so unsupported memory cannot masquerade as export
        success and an existing specification is not truncated on failure. *)
     let rendered = Pp.plain document in
-    let sentinel = "unsupported" in
+    (* Exactly the sentinel prefixes emitted by this printer; a CN identifier
+       that merely contains "unsupported" must not be rejected. *)
+    let sentinels = [ "unsupported ITP_pure_term"; "unsupported ctype"; "unsupported BT" ] in
     let contains_sentinel line =
-      let line = String.lowercase_ascii line in
-      let rec search i =
-        i + String.length sentinel <= String.length line &&
-        (String.equal (String.sub line i (String.length sentinel)) sentinel || search (i + 1))
-      in search 0
+      let has sentinel =
+        let rec search i =
+          i + String.length sentinel <= String.length line &&
+          (String.equal (String.sub line i (String.length sentinel)) sentinel || search (i + 1))
+        in search 0
+      in
+      List.exists has sentinels
     in
     (match List.find_opt contains_sentinel (String.split_on_char '\n' rendered) with
      | Some line -> failwith ("Rocq export: " ^ String.trim line)

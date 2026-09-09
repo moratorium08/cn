@@ -7,6 +7,12 @@ type itp_sym = ITP_sym of Sym.t
 
 type itp_id = ITP_id of Id.t
 
+(* Rocq record projections live in the enclosing namespace, so two C structs
+   with a member of the same name would clash. Every generated projection is
+   therefore qualified by its struct tag. *)
+let struct_field_name (tag : Sym.t) (id : Id.t) =
+  Sym.pp_string tag ^ "_" ^ Id.get_string id
+
 type itp_sign =
   | ITP_Signed
   | ITP_Unsigned

@@ -284,6 +284,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
       let xs = List.map aux l in
       parensM (flow (comma ^^ break 1) xs)
     | CI.ITP_structmember (t, CI.ITP_id fieldnm, _) ->
+      (* field names arrive already qualified by CI.struct_field_name *)
       aux t ^^ !^"." ^^ !^(Id.get_string fieldnm)
     | CI.ITP_structupdate ((t, _), x, ix) ->
       let op_nm = gen_get_upd ix (aux t) in
@@ -844,7 +845,7 @@ let translate_fun (gl : Global.t) (funs : CI.itp_fun list list * CI.itp_fun list
 (* generate records and Owned_Structname predicates for all structs*)
 let translate_structs (struct_decls : Memory.struct_decls) =
   let open Pp in
-  let piece_to_owned (piece : Memory.struct_piece) =
+  let piece_to_owned tag (piece : Memory.struct_piece) =
     let make_owned (nm : string) (id : Id.t) =
       !^(nm ^ " ")
       ^^ parens
@@ -853,7 +854,7 @@ let translate_structs (struct_decls : Memory.struct_decls) =
               ^ " "
               ^ string_of_int piece.size)
       ^^ !^" v."
-      ^^ !^(Id.get_string id)
+      ^^ !^(CI.struct_field_name tag id)
     in
     match piece.member_or_padding with
     | Some (id, ctyp) ->
@@ -872,16 +873,16 @@ let translate_structs (struct_decls : Memory.struct_decls) =
       ^^ parens (!^"arrayshift " ^^ !^"l " ^^ !^(string_of_int piece.offset) ^^ !^" 1")
       ^^ !^(" " ^ string_of_int piece.size)
   in
-  let rec decl_to_pieces (pieces : Memory.struct_piece list) =
+  let rec decl_to_pieces tag (pieces : Memory.struct_piece list) =
     match pieces with
     | [] -> rets ""
-    | x :: [] -> piece_to_owned x
-    | x :: xs -> piece_to_owned x ^^ !^" ∗ " ^^ decl_to_pieces xs
+    | x :: [] -> piece_to_owned tag x
+    | x :: xs -> piece_to_owned tag x ^^ !^" ∗ " ^^ decl_to_pieces tag xs
   in
-  let get_struct_field (piece : Memory.struct_piece) =
+  let get_struct_field tag (piece : Memory.struct_piece) =
     match piece.member_or_padding with
     | Some (id, ctype) ->
-      !^("  " ^ Id.get_string id ^ " : " ^ print_ctype ctype) ^^ hardline
+      !^("  " ^ CI.struct_field_name tag id ^ " : " ^ print_ctype ctype) ^^ hardline
     | None -> rets ""
   in
   let unpack_decls (decl : Sym.t * Memory.struct_layout) =
@@ -892,7 +893,7 @@ let translate_structs (struct_decls : Memory.struct_decls) =
     ^^ nm
     ^^ !^" where"
     ^^ hardline
-    ^^ build (List.map get_struct_field (snd decl))
+    ^^ build (List.map (get_struct_field (fst decl)) (snd decl))
     ^^ hardline
     ^^ hardline
     ^^ !^"def "
@@ -903,7 +904,7 @@ let translate_structs (struct_decls : Memory.struct_decls) =
     ^^ !^") : IProp GF := "
     ^^ hardline
     ^^ !^"iprop% "
-    ^^ decl_to_pieces (snd decl)
+    ^^ decl_to_pieces (fst decl) (snd decl)
     ^^ hardline
   in
   List.map unpack_decls (Sym.Map.bindings struct_decls)
