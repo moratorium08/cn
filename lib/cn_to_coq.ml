@@ -307,16 +307,10 @@ let lc_to_itp_ir (gl : Global.t) (t : LC.t) =
       (CI.ITP_sym sym, bt_to_itp_ir gl bt, CI.ITP_Pure (it_to_itp_ir gl it None))
 
 
-(* TODO(HK): added this auxiliary function for plumbing *)
-let q_step_to_itp_ir (step : Sctypes.t) : CI.itp_pure_term =
-  CI.ITP_const (CI.ITP_Z (Z.of_int (Memory.size_of_ctype step)))
-
 (* Primitive ownership retains the C width and initialization, not just its
    mathematical result type (which is Integer in integer mode). *)
 let owned_name (ct : Sctypes.t) =
   match ct with
-  | Integer ity when (not !BT.cnBV) && Memory.is_signed_integer_type ity ->
-    "Unsupported signed integer-mode byte ownership (CN decoder has no sign reconstruction)"
   | Integer ity ->
     "(Owned_integer " ^ string_of_int (Memory.size_of_ctype ct) ^ "%nat "
     ^ string_of_bool (Memory.is_signed_integer_type ity) ^ ")"
@@ -328,6 +322,65 @@ let scalar_resource gl nm ct init ptr =
   match init with
   | Request.Init -> CI.ITP_scalar (owned_name ct, it_to_itp_ir gl ptr None, CI.ITP_sym nm)
   | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, it_to_itp_ir gl ptr None)
+
+(* W's output is not an initialized value. Until its ghost output semantics
+   are implemented, only erase a binding if it is genuinely unused. Never
+   invent a map of zeroes/None, or leave an unbound Rocq identifier behind. *)
+let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used continuation =
+  let index_sym, index_bt = q.q in
+  let index = CI.ITP_sym_term (CI.ITP_sym index_sym) in
+  let permission = it_to_itp_ir gl q.permission None in
+  let z n = CI.ITP_const (CI.ITP_Z n) in
+  let permission =
+    match index_bt with
+    | BT.Integer -> permission
+    | BT.Bits (sign, width) ->
+      let lo, hi = BT.bits_range (sign, width) in
+      let bound op x y = CI.ITP_binop (op, x, y, CI.ITP_Bool) in
+      bound ITP_and_prop
+        (bound ITP_and_prop (bound ITP_le_prop (z lo) index) (bound ITP_le_prop index (z hi)))
+        permission
+    | _ -> failwith "Unsupported iterated resource index type"
+  in
+  let pointer =
+    CI.ITP_memory
+      ( "arrayshift",
+        [ it_to_itp_ir gl q.pointer None;
+          z (Z.of_int (Memory.size_of_ctype q.step));
+          index ] )
+  in
+  match q.name with
+  | Request.PName _ ->
+    CI.ITP_Unsupported_Resource "Unsupported iterated named resource predicate"
+  | Request.Owned (ct, init) ->
+    (match init with
+     | Request.Uninit when used ->
+       failwith "Unsupported use of iterated W output (unspecified ghost map)"
+     | _ -> ());
+    let body =
+      match init with
+      | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, pointer)
+      | Request.Init ->
+        CI.ITP_owned_value
+          (owned_name ct, pointer, CI.ITP_mapget (CI.ITP_sym_term (CI.ITP_sym nm), index))
+    in
+    (* resource.ml:derived_lc1 also requires the base to have an allocation
+       ID, even for an empty each. Shifted element footprints cannot imply it. *)
+    let resource =
+      CI.ITP_Star
+        ( CI.ITP_Pure
+            (CI.ITP_memory_bool (true, "has_alloc_id", [it_to_itp_ir gl q.pointer None])),
+          CI.ITP_each_resource (CI.ITP_sym index_sym, permission, body) )
+    in
+    let result =
+      if requires then CI.ITP_Wand (resource, continuation)
+      else CI.ITP_Star (resource, continuation)
+    in
+    match init with
+    | Request.Uninit -> result
+    | Request.Init ->
+      if requires then CI.ITP_Forall (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
+      else CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
 
 
 (* Unpacking LogicalReturnTypes *)
@@ -359,19 +412,8 @@ let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
                    it_to_itp_ir gl pointer None ),
                lrt_to_itp_ir gl t ) )
      | Q q ->
-       (match q.name with
-        | Owned _ ->
-          CI.ITP_Exists
-            ( CI.ITP_sym nm,
-              ITP_List ITP_Integer,
-              CI.ITP_Each
-                ( CI.ITP_sym nm,
-                  it_to_itp_ir gl q.pointer None,
-                  (* permission *)
-                  it_to_itp_ir gl q.permission None,
-                  (* term *)
-                  lrt_to_itp_ir gl t ) )
-        | PName _ -> CI.ITP_Unsupported_Resource "unsupported Qpred PName in LRT"))
+       iterated_resource gl nm bt q ~requires:false
+         ~used:(Sym.Set.mem nm (LRT.free_vars t)) (lrt_to_itp_ir gl t))
 
 
 (* Unpacking LogicalArgumentTypes that wrap IndexTerms (i.e. in resource predicates) *)
@@ -406,9 +448,9 @@ let rec it_lat_to_itp_ir (gl : Global.t) (t : Terms.Normal.t LAT.t) =
                    it_to_itp_ir gl pointer None ),
                it_lat_to_itp_ir gl t ) )
      | Q q ->
-       (match q.name with
-        | Owned _ -> CI.ITP_Unsupported_Resource "unsupported Qpred Owned in LRT"
-        | PName _ -> CI.ITP_Unsupported_Resource "unsupported Qpred PName in LRT"))
+       iterated_resource gl nm bt q ~requires:false
+         ~used:(Sym.Set.mem nm (LAT.free_vars Terms.Normal.free_vars t))
+         (it_lat_to_itp_ir gl t))
 
 
 (* Unpacking LogicalArgumentTypes that wrap LogicalReturnTypes *)
@@ -440,28 +482,9 @@ let rec lrtlat_to_itp_ir (gl : Global.t) t =
                    it_to_itp_ir gl pointer None ),
                lrtlat_to_itp_ir gl t ) )
      | Q q ->
-       (match q.name with
-        | Owned (_, init) ->
-          (match init with
-           | Init ->
-             CI.ITP_Forall
-               ( CI.ITP_sym nm,
-                 ITP_List ITP_Integer,
-                 CI.ITP_Each
-                   ( CI.ITP_sym nm,
-                     it_to_itp_ir gl q.pointer None,
-                     (* permission *)
-                     it_to_itp_ir gl q.permission None,
-                     (* term *)
-                     lrtlat_to_itp_ir gl t ) )
-           | Uninit ->
-             ITP_Block
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 lrtlat_to_itp_ir gl t,
-                 it_to_itp_ir gl q.pointer None ))
-          (* todo: Each stuff*)
-        | PName _ -> ITP_Unsupported_Resource "unsupported Qpred PName in LRT"))
+       iterated_resource gl nm bt q ~requires:true
+         ~used:(Sym.Set.mem nm (LAT.free_vars LRT.free_vars t))
+         (lrtlat_to_itp_ir gl t))
 
 
 (* Main translation function for lemmas *)

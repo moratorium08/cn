@@ -24,6 +24,13 @@ Module Make (C : CONFIG).
   }.
   Notation heapGS := heapGS_gen.
 
+  (* Exact finite support, rather than a syntactically guessed interval. This
+     supports sparse permissions and negative mathematical integer indices.
+     There is no assumption that an arbitrary predicate on Z is finite. *)
+  Definition each_resource {Σ} (selected : Z -> Prop) (body : Z -> iProp Σ) : iProp Σ :=
+    ∃ indices : gset Z, ⌜forall i, i ∈ indices <-> selected i⌝ ∗
+      [∗ set] i ∈ indices, body i.
+
   Section Heap.
     Context {S : Selectors} `{!heapGS_gen Σ}.
     Definition history_map (aid : AllocId) : Z * Z :=
@@ -50,10 +57,10 @@ Module Make (C : CONFIG).
     (* W is unspecified ownership, not a cell forced to contain None. *)
     Definition BlockSized (n : nat) (p : Ptr) : iProp Σ :=
       ∃ bs, Owned_raw n p bs.
-    (* Finite-width integer view. Unsigned reinterpretation is validated below.
-       The integer-UF check.ml currently equates signed values directly with
-       the nonnegative decoded sum, without sign reconstruction. Correspondence
-       for negative signed integer-mode values remains unproved (see notes). *)
+    (* Finite-width integer view. cp526/integers at 88da7060 reconstructs
+       signed values with integer_wrapI_value in check.ml:bytes_constraints.
+       Earlier integer-UF snapshots without that wrap are NOT the target of
+       this integer-mode byte embedding. *)
     Definition Owned_integer (n : nat) (signed : bool) (p : Ptr) (v : Z) : iProp Σ :=
       ∃ bs vs, Owned_raw n p bs ∗
         ⌜byte_values bs vs /\

@@ -201,7 +201,9 @@ let parensM x = Pp.parens x
 
 let rets s = Pp.string s
 
-let iris_pure x = build [ rets "⌜"; x; rets "⌝" ]
+(* Pure lifts open type_scope; explicitly restore integer arithmetic so that
+   addition is not parsed as the sum of two types. *)
+let iris_pure x = build [ rets "⌜"; Pp.(parens x ^^ string "%Z"); rets "⌝" ]
 
 let rec intersperse (sep : string) (last : string) xs =
   let open Pp in
@@ -379,7 +381,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_or -> abinop "||" x y
          | CI.ITP_or_prop -> abinop "∨" x y
          | CI.ITP_impl -> abinop "implb" x y
-         | CI.ITP_impl_prop -> abinop "-∗" x y)
+         | CI.ITP_impl_prop -> abinop "->" x y)
     | CI.ITP_match (x, cases) ->
       let br (pat, rhs) = build [ rets "|"; pat_to_itp pat; rets "=>"; aux rhs ] in
       parensM
@@ -405,11 +407,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
       parens enc
     | CI.ITP_mapset (m, x, y) -> f_appM "fun_upd" [ rets "Z.eqb"; aux m; aux x; aux y ]
     | CI.ITP_mapget (m, x) ->
-      (match x with
-       (* case for array member accesses *)
-       | CI.ITP_const (ITP_bits _) ->
-         parensM (build [ rets "nth"; aux x; aux m; rets "0" ])
-       | _ -> parensM (build [ aux m; aux x ]))
+      (* CN maps are total functions, including at constant bitvector keys. *)
+      parensM (build [ aux m; aux x ])
     | CI.ITP_recordmember (t, _, ix) -> gen_get_upd ix (aux t)
     | CI.ITP_recordupdate ((t, _), x, ix) ->
       let op_nm = gen_get_upd ix (aux t) in
@@ -466,15 +465,25 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
   | CI.ITP_Forall (CI.ITP_sym sym, bt, t) -> pp_forall sym bt (aux' t)
   | CI.ITP_Exists (CI.ITP_sym sym, bt, t) ->
     !^"∃" ^^^ parens (typ (Sym.pp sym) (bt_to_itp bt)) ^^ !^"," ^^ break 1 ^^ aux' t
-  | CI.ITP_Star (t1, t2) -> mk_star (aux' t1) (aux' t2)
-  | CI.ITP_Wand (t1, t2) -> mk_wand (aux' t1) (aux' t2)
+  | CI.ITP_Star (t1, t2) -> mk_star (parens (aux' t1)) (parens (aux' t2))
+  | CI.ITP_Wand (t1, t2) -> mk_wand (parens (aux' t1)) (parens (aux' t2))
   | CI.ITP_Pure t -> iris_pure (aux t)
   | CI.ITP_Define (CI.ITP_sym sym, x, y) -> map_split (pp_let sym (aux x)) (aux' y)
   | CI.ITP_Empty_Heap -> rets "emp"
   | CI.ITP_scalar (name, ptr, CI.ITP_sym value) ->
     build [rets name; aux ptr; Sym.pp value]
+  | CI.ITP_owned_value (name, ptr, value) ->
+    build [rets name; aux ptr; parens (aux value)]
   | CI.ITP_block_sized (size, ptr) ->
     build [rets "BlockSized"; rets (string_of_int size ^ "%nat"); aux ptr]
+  | CI.ITP_each_resource (CI.ITP_sym index, permission, body) ->
+    let lambda value =
+      parens (rets "fun" ^^^ Sym.pp index ^^^ rets ": Z =>" ^^^ value)
+    in
+    build
+      [ rets "each_resource";
+        lambda (parens (parens (aux permission) ^^ rets "%Z") ^^ rets "%type");
+        lambda (aux' body) ]
   | CI.ITP_Block (CI.ITP_sym s, _, t, _) ->
     let op_nm = "Block_" ^ Sym.pp_string s in
     parensM (build [ rets op_nm; aux' t ])
@@ -483,26 +492,6 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
   | CI.ITP_PName (CI.ITP_sym nm, CI.ITP_sym pname, iargs, ptr) ->
     let args = List.map aux iargs in
     build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])
-  | CI.ITP_Each (ITP_sym nm, ptr, perm, pred) ->
-    (match perm with
-     | ITP_binop
-         (ITP_and_prop, ITP_binop (_, min_term, _, _), ITP_binop (_, _, max_term, _), _)
-       ->
-       let min_doc a = parens (rets "Z.to_nat " ^^ a) in
-       build
-         [ rets "each_int ";
-           min_doc (aux min_term);
-           parens
-             (rets "Z.to_nat "
-              ^^ parens (aux max_term)
-              ^^ rets " - "
-              ^^ min_doc (aux min_term))
-           ^^ rets "%nat";
-           aux ptr;
-           !^(Sym.pp_string nm);
-           aux' pred
-         ]
-     | _ -> rets "unsupported ITP_Each_LAT perm")
   | CI.ITP_Good -> rets ""
   | CI.ITP_Unsupported_Resource msg -> rets msg
 

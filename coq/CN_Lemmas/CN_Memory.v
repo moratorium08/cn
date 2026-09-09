@@ -98,7 +98,7 @@ Module Make (C : CONFIG).
   Definition footprint_ok `{Selectors} (h : History) (p : Ptr) (n : Z) : Prop :=
     has_alloc_id p = true /\ 0 <= n /\
     let upper := address_Z (address (addr_of p + n)) in
-    addr_of p <= upper /\
+    (if C.bitvectors then addr_of p <= upper else upper <= modulus - 1) /\
     (if C.vip then
        address_Z (allocation_base (h (alloc_id_of p))) <= addr_of p /\
        upper <= allocation_end (h (alloc_id_of p))
