@@ -1,7 +1,7 @@
 From Stdlib Require Import ZArith.
 From iris.proofmode Require Import proofmode.
 From iris.base_logic Require Import invariants.
-Require Import IteratedExport.Iterated.
+Require Import IteratedExport.IteratedBitvector.
 
 Module Inst <: Parameters.
 End Inst.
