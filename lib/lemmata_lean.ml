@@ -236,6 +236,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_abs | CI.ITP_bw_compl -> rets "unsupported unop in Lean right now"
          | CI.ITP_BW_FFS -> f_appM "CN_Lib.find_first_set_z" [ aux x ]
          | CI.ITP_BW_CTZ -> f_appM "CN_Lib.count_trailing_zeroes_z" [ aux x ])
+    | CI.ITP_binop (CI.ITP_eq, x, y, _) -> parensM (build [ aux x; rets "=="; aux y ])
+    | CI.ITP_binop (CI.ITP_eq_prop, x, y, _) -> parensM (build [ aux x; rets "="; aux y ])
     | CI.ITP_binop (op, x, y, bt) ->
       norm_bv_op
         bt
@@ -256,8 +258,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_bwxor -> abinop "^^" x y
          | CI.ITP_bwand -> abinop "&&" x y
          | CI.ITP_bwor -> abinop "||" x y
-         | CI.ITP_eq -> abinop "==" x y
-         | CI.ITP_eq_prop -> abinop "=" x y
+         | CI.ITP_eq | CI.ITP_eq_prop -> assert false (* handled above *)
          | CI.ITP_and -> abinop "&&" x y
          | CI.ITP_and_prop -> abinop "∧" x y
          | CI.ITP_or -> abinop "||" x y

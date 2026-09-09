@@ -58,6 +58,14 @@ compile "$work/proof/Arith_Spec.v"
 compile "$work/proof/Arith_Proof.v"
 closed "$work/proof/Arith_Proof.log" 5
 
+# Boolean predicate arguments/definitions are bool values; datatype equality
+# in bool position is a decidable equality. Typechecking is the check here.
+run_cn verify "$cases/predicate_bool_arg.c" --lemmata_coq "$work/proof/Bool_Spec.v" \
+  >"$work/bool-export.log" 2>&1
+grep -q 'Flagged p true (Opt_none) before' "$work/proof/Bool_Spec.v"
+grep -q 'bool_decide (o = (Opt_none))' "$work/proof/Bool_Spec.v"
+compile "$work/proof/Bool_Spec.v"
+
 # A rejected export must preserve an existing destination, not truncate it.
 cp "$work/proof/Gen_Spec.v" "$work/protected.v"
 if run_cn verify "$cases/reject_clz.c" --lemmata_coq "$work/protected.v" \
@@ -73,4 +81,4 @@ fi
 grep -q "copy_alloc_id.*not declared" "$work/copy.log"
 test ! -e "$work/copy.v"
 
-printf 'PASS: 23 model theorems, 9 memory + 5 arithmetic exported lemmas, 2 rejection regressions.\n'
+printf 'PASS: 23 model theorems, 9 memory + 5 arithmetic exported lemmas, bool-argument typecheck, 2 rejection regressions.\n'

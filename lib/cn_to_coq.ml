@@ -184,10 +184,14 @@ let it_to_itp_ir global it b =
            CI.ITP_memory_bool (enc_prop, "ptr_eq", [f comp a; f comp b])
          else if BT.equal (Terms.get_bt a) BT.Alloc_id then
            CI.ITP_memory_bool (enc_prop, "alloc_id_eq", [f comp a; f comp b])
-         else if enc_prop then
-           CI.ITP_binop (CI.ITP_eq_prop, f comp a, f comp b, bt)
-         else
-           CI.ITP_binop (CI.ITP_eq, f comp a, f comp b, bt)
+         else (
+           (* equality records the operand type, not Bool: bool equality on
+              datatypes/records/tuples needs a decidable equality, not Z.eqb *)
+           let operand_bt = bt_to_itp_ir global (Terms.get_bt a) in
+           if enc_prop then
+             CI.ITP_binop (CI.ITP_eq_prop, f comp a, f comp b, operand_bt)
+           else
+             CI.ITP_binop (CI.ITP_eq, f comp a, f comp b, operand_bt))
        | LEPointer ->
          CI.ITP_memory_bool (enc_prop, "ptr_le", [x; y])
        | LTPointer ->
@@ -405,7 +409,7 @@ let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
     CI.ITP_Star (c, d)
   | LRT.Define ((sym, it), _, t) ->
     let d = lrt_to_itp_ir gl t in
-    let l = it_to_itp_ir gl it None in
+    let l = it_to_itp_ir gl it (Some (it, "definition")) in
     CI.ITP_Let_Resource (CI.ITP_sym sym, l, d)
   | LRT.I -> CI.ITP_Empty_Heap
   | LRT.Resource ((nm, (req, bt)), _, t) ->
@@ -414,6 +418,8 @@ let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
        let body = CI.ITP_Star (scalar_resource gl nm ct init p.pointer, lrt_to_itp_ir gl t) in
        (match init with Init -> CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, body) | Uninit -> body)
      | P {name = PName p_nm; pointer; iargs} ->
+       (* Values (predicate arguments, definitions, return values) are encoded
+          as bool terms: Rocq coerces bool to Prop, never the reverse. *)
        CI.ITP_Exists
          ( CI.ITP_sym nm,
            bt_to_itp_ir gl bt,
@@ -421,7 +427,7 @@ let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
              ( ITP_PName
                  ( CI.ITP_sym nm,
                    CI.ITP_sym p_nm,
-                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   List.map (fun x -> it_to_itp_ir gl x (Some (x, "predicate argument"))) iargs,
                    it_to_itp_ir gl pointer None ),
                lrt_to_itp_ir gl t ) )
      | Q q ->
@@ -435,7 +441,7 @@ let rec it_lat_to_itp_ir (gl : Global.t) (t : Terms.Normal.t LAT.t) =
   match t with
   | LAT.Define ((sym, it), _, t) ->
     let d = it_lat_to_itp_ir gl t in
-    let l = it_to_itp_ir gl it None in
+    let l = it_to_itp_ir gl it (Some (it, "definition")) in
     CI.ITP_Define (CI.ITP_sym sym, l, d)
   | LAT.Constraint (lc, _, t) ->
     let c = lc_to_itp_ir gl lc in
@@ -443,7 +449,8 @@ let rec it_lat_to_itp_ir (gl : Global.t) (t : Terms.Normal.t LAT.t) =
     CI.ITP_Star (c, d)
   | LAT.I t ->
     CI.ITP_Pure
-      (CI.ITP_binop (CI.ITP_eq_prop, CI.ITP_retsym, it_to_itp_ir gl t None, CI.ITP_Bool))
+      (CI.ITP_binop
+         (CI.ITP_eq_prop, CI.ITP_retsym, it_to_itp_ir gl t (Some (t, "return value")), CI.ITP_Bool))
   | LAT.Resource ((nm, (req, bt)), _, t) ->
     (match req with
      | P ({name = Owned (ct, init); _} as p) ->
@@ -457,7 +464,7 @@ let rec it_lat_to_itp_ir (gl : Global.t) (t : Terms.Normal.t LAT.t) =
              ( ITP_PName
                  ( CI.ITP_sym nm,
                    CI.ITP_sym p_nm,
-                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   List.map (fun x -> it_to_itp_ir gl x (Some (x, "predicate argument"))) iargs,
                    it_to_itp_ir gl pointer None ),
                it_lat_to_itp_ir gl t ) )
      | Q q ->
@@ -471,7 +478,7 @@ let rec lrtlat_to_itp_ir (gl : Global.t) t =
   match t with
   | LAT.Define ((sym, it), _, t) ->
     let d = lrtlat_to_itp_ir gl t in
-    let l = it_to_itp_ir gl it None in
+    let l = it_to_itp_ir gl it (Some (it, "definition")) in
     CI.ITP_Define (CI.ITP_sym sym, l, d)
   | LAT.Constraint (lc, _, t) ->
     let c = lc_to_itp_ir gl lc in
@@ -491,7 +498,7 @@ let rec lrtlat_to_itp_ir (gl : Global.t) t =
              ( ITP_PName
                  ( CI.ITP_sym nm,
                    CI.ITP_sym p_nm,
-                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   List.map (fun x -> it_to_itp_ir gl x (Some (x, "predicate argument"))) iargs,
                    it_to_itp_ir gl pointer None ),
                lrtlat_to_itp_ir gl t ) )
      | Q q ->

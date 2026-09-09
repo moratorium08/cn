@@ -380,6 +380,11 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_bw_compl -> parensM (build [ rets "-"; aux x; rets "- 1" ])
          | CI.ITP_BW_FFS -> f_appM "CN_Lib.find_first_set_z" [ aux x ]
          | CI.ITP_BW_CTZ -> f_appM "CN_Lib.count_trailing_zeroes_z" [ aux x ])
+    | CI.ITP_binop (CI.ITP_eq_prop, x, y, _) -> parensM (build [ aux x; rets "="; aux y ])
+    | CI.ITP_binop (CI.ITP_eq, x, y, operand_bt) ->
+      (match operand_bt with
+       | CI.ITP_Integer | CI.ITP_Bits _ -> parensM (build [ aux x; rets "=?"; aux y ])
+       | _ -> f_appM "bool_decide" [ parensM (build [ aux x; rets "="; aux y ]) ])
     | CI.ITP_binop (op, x, y, bt) ->
       norm_bv_op
         bt
@@ -412,8 +417,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_bwxor -> f_appM "Z.lxor" [ aux x; aux y ]
          | CI.ITP_bwand -> f_appM "Z.land" [ aux x; aux y ]
          | CI.ITP_bwor -> f_appM "Z.lor" [ aux x; aux y ]
-         | CI.ITP_eq -> parensM (build [ aux x; rets "=?"; aux y ])
-         | CI.ITP_eq_prop -> parensM (build [ aux x; rets "="; aux y ])
+         | CI.ITP_eq | CI.ITP_eq_prop -> assert false (* handled above *)
          | CI.ITP_and -> abinop "&&" x y
          | CI.ITP_and_prop -> abinop "∧" x y
          | CI.ITP_or -> abinop "||" x y
@@ -547,6 +551,16 @@ let convert_lemma_defs global (lemmas : CI.itp_lemma list) =
   tys
 
 
+(* Decidable equality, so CN's boolean == on records and datatypes can be
+   printed as bool_decide. *)
+let eq_decision_instance name =
+  let open Pp in
+  !^("  Global Instance " ^ name ^ "_eq_dec : EqDecision " ^ name ^ ".")
+  ^^ hardline
+  ^^ !^"  Proof. solve_decision. Defined."
+  ^^ hardline
+
+
 let generate_structs (struct_decls : Memory.struct_decls) =
   let open Pp in
   let get_struct_field tag (piece : Memory.struct_piece) =
@@ -564,6 +578,8 @@ let generate_structs (struct_decls : Memory.struct_decls) =
     ^^ hardline
     ^^ build (List.map (get_struct_field (fst decl)) (snd decl))
     ^^ !^" }."
+    ^^ hardline
+    ^^ eq_decision_instance (sym_string (fst decl))
   in
   List.map unpack_struct_type (Sym.Map.bindings struct_decls)
 
@@ -587,6 +603,11 @@ let translate_datatypes (dtys : CI.itp_dt list list) =
          (List.map dt_eqs dty_clump))
     ^^ !^"."
     ^^ hardline
+    ^^ flow
+         hardline
+         (List.map
+            (fun (CI.ITP_dt (CI.ITP_sym nm, _, _)) -> eq_decision_instance (sym_string nm))
+            dty_clump)
   in
   let rec f (dtys : CI.itp_dt list list) =
     match dtys with [] -> [] | x :: xs -> print_dt x :: f xs
