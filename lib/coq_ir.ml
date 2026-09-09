@@ -101,6 +101,8 @@ type itp_pure_term =
   | ITP_let_pure of itp_sym * itp_pure_term * itp_pure_term
   | ITP_wrapI of Z.t * Z.t * itp_pure_term
   | ITP_arrayshift of itp_pure_term * Z.t * itp_pure_term
+  | ITP_memory of string * itp_pure_term list
+  | ITP_memory_bool of bool * string * itp_pure_term list
   | ITP_good
   | ITP_retsym
   | ITP_unsupported_pure of string
@@ -120,6 +122,8 @@ type itp_resource_term =
   | ITP_PName of itp_sym * itp_sym * itp_pure_term list * itp_pure_term
   | ITP_Each of itp_sym * itp_pure_term * itp_pure_term * itp_resource_term
   | ITP_Empty_Heap
+  | ITP_scalar of string * itp_pure_term * itp_sym
+  | ITP_block_sized of int * itp_pure_term
   | ITP_Unsupported_Resource of string
 
 (* CN datatypes *)

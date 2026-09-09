@@ -118,6 +118,7 @@ let it_to_itp_ir global it b =
     in
     let bt = bt_to_itp_ir global (Terms.Normal.get_bt it) in
     match Terms.Normal.get_term it with
+    | Terms.Sym s when Sym.equal s Alloc.History.sym -> CI.ITP_memory ("history_map", [])
     | Terms.Sym s -> CI.ITP_sym_term (CI.ITP_sym s)
     | Terms.Const l ->
       (match l with
@@ -130,10 +131,11 @@ let it_to_itp_ir global it b =
        | Terms.Bits (info, z) -> CI.ITP_const (CI.ITP_bits (BT.normalise_to_range info z))
        | Terms.Q _ -> CI.ITP_unsupported_pure "Unsupported const Q"
        | Terms.MemByte _ -> CI.ITP_unsupported_pure "Unsupported const membyte"
-       | Terms.Pointer _ -> CI.ITP_unsupported_pure "Unsupported const pointer"
-       | Terms.Alloc_id _ -> CI.ITP_unsupported_pure "Unsupported const alloc_id"
+       | Terms.Pointer p ->
+         CI.ITP_memory ("aia", [CI.ITP_memory ("allocation_id", [CI.ITP_const (CI.ITP_Z p.alloc_id)]); CI.ITP_const (CI.ITP_Z p.addr)])
+       | Terms.Alloc_id aid -> CI.ITP_memory ("allocation_id", [CI.ITP_const (CI.ITP_Z aid)])
        | Terms.Unit -> CI.ITP_const CI.ITP_unit
-       | Terms.Null -> CI.ITP_const (CI.ITP_Z Z.zero)
+       | Terms.Null -> CI.ITP_memory ("null", [])
        | Terms.CType_const _ -> CI.ITP_unsupported_pure "Unsupported const ctype"
        | Terms.Default _ -> CI.ITP_unsupported_pure "Unsupported const default")
     | Terms.Unop (op, a) ->
@@ -175,20 +177,18 @@ let it_to_itp_ir global it b =
        | BW_Or -> CI.ITP_binop (CI.ITP_bwor, x, y, bt)
        | EQ ->
          let comp = Some (it, "argument of equality") in
-         if enc_prop then
+         if BT.equal (Terms.get_bt a) (BT.Loc ()) then
+           CI.ITP_memory_bool (enc_prop, "ptr_eq", [f comp a; f comp b])
+         else if BT.equal (Terms.get_bt a) BT.Alloc_id then
+           CI.ITP_memory_bool (enc_prop, "alloc_id_eq", [f comp a; f comp b])
+         else if enc_prop then
            CI.ITP_binop (CI.ITP_eq_prop, f comp a, f comp b, bt)
          else
            CI.ITP_binop (CI.ITP_eq, f comp a, f comp b, bt)
        | LEPointer ->
-         if enc_prop then
-           CI.ITP_binop (CI.ITP_le_prop, x, y, bt)
-         else
-           CI.ITP_binop (CI.ITP_le, x, y, bt)
+         CI.ITP_memory_bool (enc_prop, "ptr_le", [x; y])
        | LTPointer ->
-         if enc_prop then
-           CI.ITP_binop (CI.ITP_lt_prop, x, y, bt)
-         else
-           CI.ITP_binop (CI.ITP_lt, x, y, bt)
+         CI.ITP_memory_bool (enc_prop, "ptr_lt", [x; y])
        | And ->
          if enc_prop then
            CI.ITP_binop (CI.ITP_and_prop, x, y, bt)
@@ -239,17 +239,18 @@ let it_to_itp_ir global it b =
       let mems, _bts = get_struct_xs global.struct_decls tag in
       let ix = find_tuple_element Id.equal m mems in
       CI.ITP_structupdate ((aux t, CI.ITP_id m), aux x, ix)
-    | Terms.Cast (cbt, t) -> CI.ITP_cast (bt_to_itp_ir global cbt, aux t)
+    | Terms.Cast (cbt, t) ->
+      let comp = Some (it, "cast operand") in
+      (match Terms.get_bt t, cbt with
+       | BT.Loc (), BT.Alloc_id -> CI.ITP_memory ("alloc_id_of", [f comp t])
+       | BT.Loc (), (BT.Integer | BT.Bits _) ->
+         CI.ITP_cast (bt_to_itp_ir global cbt, CI.ITP_memory ("addr_of", [f comp t]))
+       | (BT.Integer | BT.Bits _), BT.Loc () -> CI.ITP_memory ("addr_to_ptr", [f comp t])
+       | _ -> CI.ITP_cast (bt_to_itp_ir global cbt, aux t))
     | Terms.Apply (name, args) -> CI.ITP_apply (CI.ITP_sym name, List.map aux args)
     (* | Terms.Good (_, t) -> CI.ITP_good (aux t) *)
-    | Terms.Good (_, _) -> CI.ITP_good
-    | Terms.Representable (ct, t2) when Option.is_some (Sctypes.is_struct_ctype ct) ->
-      (match Sctypes.is_struct_ctype ct with
-       | Some s ->
-         CI.ITP_representable (CI.ITP_sym s, CI.ITP_Struct (CI.ITP_sym s, []), aux t2)
-       | None ->
-         CI.ITP_unsupported_pure
-           "Unsupported representable (why are we in the None case?)")
+    | Terms.Good (ct, t) -> f comp_bool (MT.good_value global.struct_decls ct t (Terms.get_loc it))
+    | Terms.Representable (ct, t) -> f comp_bool (MT.representable global.struct_decls ct t (Terms.get_loc it))
     | Terms.Constructor (nm, id_args) ->
       let comp = Some (it, "datatype contents") in
       (* assuming here that the id's are in canonical order *)
@@ -274,15 +275,18 @@ let it_to_itp_ir global it b =
     | Terms.Tuple _ -> CI.ITP_unsupported_pure "Unsupported tuple"
     | Terms.NthTuple (_, _) -> CI.ITP_unsupported_pure "Unsupported nth tuple"
     | Terms.Struct (_, _) -> CI.ITP_unsupported_pure "Unsupported struct"
-    | Terms.MemberShift _ -> CI.ITP_unsupported_pure "Unsupported member shift"
-    | Terms.CopyAllocId _ -> CI.ITP_unsupported_pure "Unsupported copy alloc id"
-    | Terms.HasAllocId _ -> CI.ITP_unsupported_pure "Unsupported has alloc id"
+    | Terms.MemberShift (p, tag, member) ->
+      let decl = Sym.Map.find tag global.struct_decls in
+      let offset = Option.get (Memory.member_offset decl member) in
+      CI.ITP_memory ("ptr_shift", [aux p; CI.ITP_const (CI.ITP_Z (Z.of_int offset))])
+    | Terms.CopyAllocId {addr; loc} -> CI.ITP_memory ("copy_alloc_id", [aux loc; aux addr])
+    | Terms.HasAllocId p -> CI.ITP_memory_bool (enc_prop, "has_alloc_id", [aux p])
     | Terms.Nil _ -> CI.ITP_unsupported_pure "Unsupported nil"
     | Terms.Cons (_, _) -> CI.ITP_unsupported_pure "Unsupported cons"
     | Terms.Head _ -> CI.ITP_unsupported_pure "Unsupported head"
     | Terms.Tail _ -> CI.ITP_unsupported_pure "Unsupported tail"
-    | Terms.Representable (_, _) -> CI.ITP_unsupported_pure "Unsupported representable"
-    | Terms.Aligned _ -> CI.ITP_unsupported_pure "Unsupported aligned"
+    | Terms.Aligned a ->
+      f comp_bool (MT.divisible_ (MT.addr_ a.t (Terms.get_loc it), a.align) (Terms.get_loc it))
     | Terms.MapConst (_, _) -> CI.ITP_unsupported_pure "Unsupported map const"
     | Terms.MapDef (_, _) -> CI.ITP_unsupported_pure "Unsupported map def"
     | Terms.CN_None _ | Terms.CN_Some _ | Terms.IsSome _ | Terms.GetOpt _ ->
@@ -307,6 +311,24 @@ let lc_to_itp_ir (gl : Global.t) (t : LC.t) =
 let q_step_to_itp_ir (step : Sctypes.t) : CI.itp_pure_term =
   CI.ITP_const (CI.ITP_Z (Z.of_int (Memory.size_of_ctype step)))
 
+(* Primitive ownership retains the C width and initialization, not just its
+   mathematical result type (which is Integer in integer mode). *)
+let owned_name (ct : Sctypes.t) =
+  match ct with
+  | Integer ity when (not !BT.cnBV) && Memory.is_signed_integer_type ity ->
+    "Unsupported signed integer-mode byte ownership (CN decoder has no sign reconstruction)"
+  | Integer ity ->
+    "(Owned_integer " ^ string_of_int (Memory.size_of_ctype ct) ^ "%nat "
+    ^ string_of_bool (Memory.is_signed_integer_type ity) ^ ")"
+  | Pointer _ -> "Owned_pointer"
+  | Struct nm -> "Owned_" ^ Sym.pp_string nm
+  | _ -> "Unsupported primitive ownership (byte/array/function)"
+
+let scalar_resource gl nm ct init ptr =
+  match init with
+  | Request.Init -> CI.ITP_scalar (owned_name ct, it_to_itp_ir gl ptr None, CI.ITP_sym nm)
+  | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, it_to_itp_ir gl ptr None)
+
 
 (* Unpacking LogicalReturnTypes *)
 let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
@@ -322,42 +344,20 @@ let rec lrt_to_itp_ir (gl : Global.t) (t : LRT.t) =
   | LRT.I -> CI.ITP_Empty_Heap
   | LRT.Resource ((nm, (req, bt)), _, t) ->
     (match req with
-     | P p ->
-       (match p.name with
-        | Owned (_, init) ->
-          (match init with
-           | Init ->
-             let op_nm =
-               match bt with
-               | BaseTypes.Bits _ -> "Owned_int"
-               | BaseTypes.Struct nm -> "Owned_" ^ Sym.pp_string nm
-               | _ -> "Unsupported owned_LRT type"
-             in
-             CI.ITP_Exists
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 ITP_Owned
-                   ( op_nm,
-                     it_to_itp_ir gl p.pointer None,
-                     CI.ITP_sym nm,
-                     lrt_to_itp_ir gl t ) )
-           | Uninit ->
-             ITP_Block
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 lrt_to_itp_ir gl t,
-                 it_to_itp_ir gl p.pointer None ))
-        | PName p_nm ->
-          CI.ITP_Exists
-            ( CI.ITP_sym nm,
-              bt_to_itp_ir gl bt,
-              CI.ITP_Star
-                ( ITP_PName
-                    ( CI.ITP_sym nm,
-                      CI.ITP_sym p_nm,
-                      List.map (fun x -> it_to_itp_ir gl x None) p.iargs,
-                      it_to_itp_ir gl p.pointer None ),
-                  lrt_to_itp_ir gl t ) ))
+     | P ({name = Owned (ct, init); _} as p) ->
+       let body = CI.ITP_Star (scalar_resource gl nm ct init p.pointer, lrt_to_itp_ir gl t) in
+       (match init with Init -> CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, body) | Uninit -> body)
+     | P {name = PName p_nm; pointer; iargs} ->
+       CI.ITP_Exists
+         ( CI.ITP_sym nm,
+           bt_to_itp_ir gl bt,
+           CI.ITP_Star
+             ( ITP_PName
+                 ( CI.ITP_sym nm,
+                   CI.ITP_sym p_nm,
+                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   it_to_itp_ir gl pointer None ),
+               lrt_to_itp_ir gl t ) )
      | Q q ->
        (match q.name with
         | Owned _ ->
@@ -391,46 +391,20 @@ let rec it_lat_to_itp_ir (gl : Global.t) (t : Terms.Normal.t LAT.t) =
       (CI.ITP_binop (CI.ITP_eq_prop, CI.ITP_retsym, it_to_itp_ir gl t None, CI.ITP_Bool))
   | LAT.Resource ((nm, (req, bt)), _, t) ->
     (match req with
-     | P p ->
-       (match p.name with
-        | Owned (_, init) ->
-          (match init with
-           | Init ->
-             let op_nm =
-               match bt with
-               | BaseTypes.Bits _ -> "Owned_int"
-               | BaseTypes.Loc _ -> "Owned_int"
-               | BaseTypes.Map _ -> "Owned_int"
-               | BaseTypes.Struct nm -> "Owned_" ^ Sym.pp_string nm
-               | _ -> "Unsupported owned_LRT type"
-             in
-             CI.ITP_Exists
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 ITP_Owned
-                   ( op_nm,
-                     it_to_itp_ir gl p.pointer None,
-                     CI.ITP_sym nm,
-                     it_lat_to_itp_ir gl t ) )
-             (* TODO: forall case if if_clause is false? *)
-           | Uninit ->
-             ITP_Block
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 it_lat_to_itp_ir gl t,
-                 it_to_itp_ir gl p.pointer None ))
-        | PName p_nm ->
-          CI.ITP_Exists
-            ( CI.ITP_sym nm,
-              bt_to_itp_ir gl bt,
-              CI.ITP_Star
-                ( ITP_PName
-                    ( CI.ITP_sym nm,
-                      CI.ITP_sym p_nm,
-                      List.map (fun x -> it_to_itp_ir gl x None) p.iargs,
-                      it_to_itp_ir gl p.pointer None ),
-                  it_lat_to_itp_ir gl t ) ))
-     (* Can iterated resources even appear here? *)
+     | P ({name = Owned (ct, init); _} as p) ->
+       let body = CI.ITP_Star (scalar_resource gl nm ct init p.pointer, it_lat_to_itp_ir gl t) in
+       (match init with Init -> CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, body) | Uninit -> body)
+     | P {name = PName p_nm; pointer; iargs} ->
+       CI.ITP_Exists
+         ( CI.ITP_sym nm,
+           bt_to_itp_ir gl bt,
+           CI.ITP_Star
+             ( ITP_PName
+                 ( CI.ITP_sym nm,
+                   CI.ITP_sym p_nm,
+                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   it_to_itp_ir gl pointer None ),
+               it_lat_to_itp_ir gl t ) )
      | Q q ->
        (match q.name with
         | Owned _ -> CI.ITP_Unsupported_Resource "unsupported Qpred Owned in LRT"
@@ -451,44 +425,20 @@ let rec lrtlat_to_itp_ir (gl : Global.t) t =
   | LAT.I t -> lrt_to_itp_ir gl t
   | LAT.Resource ((nm, (req, bt)), _, t) ->
     (match req with
-     | P p ->
-       (match p.name with
-        | Owned (_, init) ->
-          (match init with
-           | Init ->
-             let op_nm =
-               match bt with
-               | BaseTypes.Bits _ -> "Owned_int"
-               | BaseTypes.Loc _ -> "Owned_int"
-               | BaseTypes.Map _ -> "Owned_int"
-               | BaseTypes.Struct nm -> "Owned_" ^ Sym.pp_string nm
-               | _ -> "Unsupported owned_LRT type"
-             in
-             CI.ITP_Forall
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 ITP_Owned
-                   ( op_nm,
-                     it_to_itp_ir gl p.pointer None,
-                     CI.ITP_sym nm,
-                     lrtlat_to_itp_ir gl t ) )
-           | Uninit ->
-             ITP_Block
-               ( CI.ITP_sym nm,
-                 bt_to_itp_ir gl bt,
-                 lrtlat_to_itp_ir gl t,
-                 it_to_itp_ir gl p.pointer None ))
-        | PName p_nm ->
-          CI.ITP_Forall
-            ( CI.ITP_sym nm,
-              bt_to_itp_ir gl bt,
-              CI.ITP_Wand
-                ( ITP_PName
-                    ( CI.ITP_sym nm,
-                      CI.ITP_sym p_nm,
-                      List.map (fun x -> it_to_itp_ir gl x None) p.iargs,
-                      it_to_itp_ir gl p.pointer None ),
-                  lrtlat_to_itp_ir gl t ) ))
+     | P ({name = Owned (ct, init); _} as p) ->
+       let body = CI.ITP_Wand (scalar_resource gl nm ct init p.pointer, lrtlat_to_itp_ir gl t) in
+       (match init with Init -> CI.ITP_Forall (CI.ITP_sym nm, bt_to_itp_ir gl bt, body) | Uninit -> body)
+     | P {name = PName p_nm; pointer; iargs} ->
+       CI.ITP_Forall
+         ( CI.ITP_sym nm,
+           bt_to_itp_ir gl bt,
+           CI.ITP_Wand
+             ( ITP_PName
+                 ( CI.ITP_sym nm,
+                   CI.ITP_sym p_nm,
+                   List.map (fun x -> it_to_itp_ir gl x None) iargs,
+                   it_to_itp_ir gl pointer None ),
+               lrtlat_to_itp_ir gl t ) )
      | Q q ->
        (match q.name with
         | Owned (_, init) ->

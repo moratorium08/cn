@@ -22,7 +22,15 @@ let header filename =
   ^^ hardline
   ^^ !^"Require CN_Lemmas.CN_Lib."
   ^^ hardline
-  ^^ !^"Require Import CN_Lemmas.CN_Lib_Iris."
+  ^^ !^"Require Import CN_Lemmas.CN_Memory_Iris."
+  ^^ hardline
+  ^^ !^("Module CN_ExportConfig <: CN_Memory.CONFIG.\n"
+        ^ "  Definition pointer_bits := " ^ string_of_int (Memory.size_of_pointer * Memory.bits_per_byte) ^ "%nat.\n"
+        ^ "  Definition bitvectors := " ^ string_of_bool !BT.cnBV ^ ".\n"
+        ^ "  Definition vip := " ^ string_of_bool !MakeTerm.use_vip ^ ".\n"
+        ^ "End CN_ExportConfig.\n"
+        ^ "Module CN_Lib_Iris := CN_Memory_Iris.Make(CN_ExportConfig).\n"
+        ^ "Export CN_Lib_Iris CN_Lib_Iris.Memory.")
   ^^ hardline
   ^^ !^"From iris.bi.lib Require Import fixpoint_mono."
   ^^ hardline
@@ -41,7 +49,7 @@ let open_iris_mode iris_defs section_name =
   ^^ !^section_name
   ^^ !^"."
   ^^ hardline
-  ^^ !^"  Context `{!heapGS_gen Σ}."
+  ^^ !^"  Context {cn_selectors : Selectors} `{!heapGS_gen Σ}."
   ^^ hardline
   ^^ hardline
   ^^ flow hardline iris_defs
@@ -283,7 +291,7 @@ let rec bt_to_itp (bt : CI.itp_bt) =
   | CI.ITP_Unit -> !^"unit"
   | CI.ITP_Membyte -> !^"unsupported BT membyte"
   | CI.ITP_Real -> !^"unsupported BT real"
-  | CI.ITP_Alloc_id -> !^"unsupported BT alloc_id"
+  | CI.ITP_Alloc_id -> !^"AllocId"
   | CI.ITP_CType -> !^"unsupported BT ctype"
   | CI.ITP_Tuple fld_bts ->
     let enc_fld_bts = List.map bt_to_itp fld_bts in
@@ -414,6 +422,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     | CI.ITP_structupdate ((t, _), x, ix) ->
       let op_nm = gen_get_upd ix (aux t) in
       parensM (build [ op_nm; aux x ])
+    | CI.ITP_cast (bt, (CI.ITP_memory ("addr_of", _) as x)) -> norm_bv_op bt (aux x)
     | CI.ITP_cast (_, x) -> aux x
     | CI.ITP_apply (CI.ITP_sym name, args) ->
       parensM (build ([ Sym.pp name ] @ List.map aux args))
@@ -432,6 +441,12 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     | CI.ITP_let_pure (CI.ITP_sym nm, x, y) -> parensM (pp_let nm (aux x) (aux y))
     | CI.ITP_arrayshift (base, ct, index) ->
       f_appM "arrayshift" [ aux base; enc_z ct; aux index ]
+    | CI.ITP_memory (name, args) ->
+      let prefix = if String.equal name "history_map" then "CN_Lib_Iris." else "CN_Lib_Iris.Memory." in
+      f_appM (prefix ^ name) (List.map aux args)
+    | CI.ITP_memory_bool (prop, name, args) ->
+      let term = f_appM ("CN_Lib_Iris.Memory." ^ name) (List.map aux args) in
+      if prop then f_appM "Is_true" [term] else term
     | CI.ITP_good -> rets ""
     | CI.ITP_retsym -> rets ret_sym
     | CI.ITP_unsupported_pure msg -> rets ("unsupported ITP_pure_term: " ^ msg)
@@ -456,6 +471,10 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
   | CI.ITP_Pure t -> iris_pure (aux t)
   | CI.ITP_Define (CI.ITP_sym sym, x, y) -> map_split (pp_let sym (aux x)) (aux' y)
   | CI.ITP_Empty_Heap -> rets "emp"
+  | CI.ITP_scalar (name, ptr, CI.ITP_sym value) ->
+    build [rets name; aux ptr; Sym.pp value]
+  | CI.ITP_block_sized (size, ptr) ->
+    build [rets "BlockSized"; rets (string_of_int size ^ "%nat"); aux ptr]
   | CI.ITP_Block (CI.ITP_sym s, _, t, _) ->
     let op_nm = "Block_" ^ Sym.pp_string s in
     parensM (build [ rets op_nm; aux' t ])
@@ -949,9 +968,10 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
 
 let translate_uninterp_pred =
   let open Pp in
-  List.map (fun (CI.ITP_sym nm, _, args, ret_ty) ->
+  List.filter_map (fun (CI.ITP_sym nm, _, args, ret_ty) ->
+    if Sym.equal nm Alloc.Predicate.sym then None else
     let ty = make_pred_ty args ret_ty "iProp Σ" in
-    (!^"  Parameter" ^^^ typ (Sym.pp nm) ty ^^ !^"." ^^ hardline) ^^ hardline)
+    Some ((!^"  Parameter" ^^^ typ (Sym.pp nm) ty ^^ !^"." ^^ hardline) ^^ hardline))
 
 
 (* translate functions to ITP *)
@@ -1015,7 +1035,7 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
     let make_owned (nm : string) (id : Id.t) =
       !^(nm ^ " ")
       ^^ parens
-           !^("CN_Lib_Iris.shift l "
+           !^("CN_Lib_Iris.Memory.shift l "
               ^ string_of_int piece.offset
               ^ " "
               ^ string_of_int piece.size)
@@ -1026,10 +1046,10 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
     | Some (id, ctyp) ->
       (match ctyp with
        | Void -> rets "unsupported ctype void"
-       | Integer _ -> make_owned "Owned_int" id
+       | Integer _ -> make_owned (CC.owned_name ctyp) id
        | Array _ -> rets "unsupported ctype array"
        (* todo: probably not right? *)
-       | Pointer _ -> make_owned "Owned_int" id
+       | Pointer _ -> make_owned "Owned_pointer" id
        | Struct s -> make_owned ("Owned_" ^ Sym.pp_string s) id
        | Function _ -> rets "unsupported ctype function"
        | Byte -> rets "unsupported ctype function")
@@ -1053,6 +1073,9 @@ let translate_own_structs (struct_decls : Memory.struct_decls) =
     ^^ !^" (l: Ptr) (v : "
     ^^ nm
     ^^ !^") : iProp Σ := "
+    ^^ !^"⌜footprint_ok allocation_history l "
+    ^^ !^(string_of_int (Memory.size_of_ctype (Sctypes.Struct (fst decl))))
+    ^^ !^"⌝ ∗ "
     ^^ decl_to_pieces (snd decl)
     ^^ hardline
   in
@@ -1064,8 +1087,6 @@ let generate (global : Global.t) directions (lemmata : (Sym.t * (Loc.t * AT.lemm
   =
   let f =
     let filename, _kinds = parse_directions directions in
-    let channel = open_out filename in
-    Pp.print channel (header filename);
     (* translate everything to itp AST*)
     let (CI.ITP_gl (dtys, funs, preds, uninterp_preds, lemmas)) =
       CC.cn_to_itp_ir global lemmata
@@ -1082,22 +1103,32 @@ let generate (global : Global.t) directions (lemmata : (Sym.t * (Loc.t * AT.lemm
     let translated_funs = translate_fun global funs in
     let translated_uninterp_preds = translate_uninterp_pred uninterp_preds in
     let pred_group_tys, translated_preds = translate_pred global preds in
-    (* print datatypes *)
-    Pp.print channel (types_spec (struct_defs @ dtypes @ pred_group_tys));
-    (* print uninterpreted logical functions and resource predicates as parameters *)
-    Pp.print channel (param_spec (fst translated_funs));
-    (* print structs and function definitions *)
-    Pp.print
-      channel
-      (defs_module (structs @ translated_uninterp_preds @ snd translated_funs));
-    (* print resource predicates *)
-    Pp.print channel (pred_spec translated_preds);
-    (* print function definitions *)
-    (* print lemmas *)
     let translated_lemmas = convert_lemma_defs global lemmas in
-    Pp.print channel (lemmas_module [] translated_lemmas);
-    Pp.print
-      channel
-      (mod_spec (List.map (fun (CI.ITP_lemma (CI.ITP_sym nm, _)) -> nm) lemmas))
+    let document = Pp.flow Pp.hardline [
+      header filename;
+      types_spec (struct_defs @ dtypes @ pred_group_tys);
+      param_spec (fst translated_funs);
+      defs_module (structs @ translated_uninterp_preds @ snd translated_funs);
+      pred_spec translated_preds;
+      lemmas_module [] translated_lemmas;
+      mod_spec (List.map (fun (CI.ITP_lemma (CI.ITP_sym nm, _)) -> nm) lemmas)
+    ] in
+    (* Existing unimplemented branches emit sentinel text. Reject those before
+       opening the output, so unsupported memory cannot masquerade as export
+       success and an existing specification is not truncated on failure. *)
+    let rendered = Pp.plain document in
+    let sentinel = "unsupported" in
+    let contains_sentinel line =
+      let line = String.lowercase_ascii line in
+      let rec search i =
+        i + String.length sentinel <= String.length line &&
+        (String.equal (String.sub line i (String.length sentinel)) sentinel || search (i + 1))
+      in search 0
+    in
+    (match List.find_opt contains_sentinel (String.split_on_char '\n' rendered) with
+     | Some line -> failwith ("Rocq export: " ^ String.trim line)
+     | None -> ());
+    let channel = open_out filename in
+    Fun.protect ~finally:(fun () -> close_out channel) (fun () -> Pp.print channel document)
   in
   f

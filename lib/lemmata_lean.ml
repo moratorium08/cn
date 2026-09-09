@@ -305,6 +305,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     | CI.ITP_arrayshift (base, ct, index) ->
       f_appM "arrayshift" [ aux base; enc_z ct; aux index ]
     | CI.ITP_good -> rets ""
+    | CI.ITP_memory _ | CI.ITP_memory_bool _ ->
+      failwith "VIP memory terms are currently supported only by the Rocq exporter"
     | CI.ITP_retsym -> rets ret_sym
     | CI.ITP_unsupported_pure msg -> rets ("unsupported ITP_pure_term: " ^ msg)
   in
@@ -340,6 +342,8 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
     rets "Each is unsupported in Lean right now"
     (* TODO: pending upstream decisions about arrays *)
   | CI.ITP_Good -> rets ""
+  | CI.ITP_scalar _ | CI.ITP_block_sized _ ->
+    failwith "Typed memory resources are currently supported only by the Rocq exporter"
   | CI.ITP_Unsupported_Resource msg -> rets msg
 
 

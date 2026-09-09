@@ -8,6 +8,8 @@ if [[ $# -ne 0 && ($# -ne 2 || $1 != --only) ]]; then
 fi
 
 DIRNAME=$(dirname "$0")
+CN_BIN=${CN:-cn}
+if [[ "$CN_BIN" == */* ]]; then CN_BIN=$(realpath "$CN_BIN"); fi
 LEMMA_DIR="${DIRNAME}/rocq_lemmas"
 WORK_DIR=$(mktemp -d /tmp/cn-rocq-lemmas.XXXXXX)
 trap 'rm -rf "${WORK_DIR}"' EXIT HUP INT TERM
@@ -23,12 +25,14 @@ run_proof_case() {
   mkdir -p "${theory_dir}"
   cp "${DIRNAME}/../coq/CN_Lemmas/CN_Lib.v" "${theory_dir}/"
   cp "${DIRNAME}/../coq/CN_Lemmas/CN_Lib_Iris.v" "${theory_dir}/"
+  cp "${DIRNAME}/../coq/CN_Lemmas/CN_Memory.v" "${theory_dir}/"
+  cp "${DIRNAME}/../coq/CN_Lemmas/CN_Memory_Iris.v" "${theory_dir}/"
   cp "${DIRNAME}/../coq/CN_Lemmas/CN_Lib_Iris_Fixpoint.v" "${theory_dir}/"
   cp "${proof_dir}"/*.v "${theory_dir}/"
   cp "${proof_dir}/_CoqProject" "${case_dir}/"
 
   if ! (cd "${LEMMA_DIR}/cases/${source_dir}" &&
-        timeout 60 cn verify "${input_file}" \
+        timeout 60 "${CN_BIN}" verify "${input_file}" \
           --lemmata_coq "${theory_dir}/Gen_Spec.v") >"${case_dir}/cn.log" 2>&1; then
     cat "${case_dir}/cn.log"
     return 1
@@ -36,6 +40,7 @@ run_proof_case() {
 
   (cd "${case_dir}" &&
     rocq makefile -f _CoqProject \
+      theories/CN_Memory.v theories/CN_Memory_Iris.v \
       theories/CN_Lib_Iris_Fixpoint.v -o Makefile.coq &&
     timeout 60 make -f Makefile.coq)
 }
