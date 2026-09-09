@@ -48,6 +48,9 @@ type itp_const =
 type itp_unop =
   | ITP_neg
   | ITP_neg_prop
+  | ITP_negate (* arithmetic negation *)
+  | ITP_abs
+  | ITP_bw_compl
   | ITP_BW_FFS
   | ITP_BW_CTZ
 

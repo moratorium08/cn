@@ -353,6 +353,11 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
         (match op with
          | CI.ITP_neg -> f_appM "negb" [ aux x ]
          | CI.ITP_neg_prop -> f_appM "~" [ aux x ]
+         | CI.ITP_negate -> parensM (build [ rets "-"; aux x ])
+         | CI.ITP_abs -> f_appM "Z.abs" [ aux x ]
+         (* solver.ml: BW_Compl is -x-1 in integer mode and bvnot for bitvectors,
+            which norm_bv_op's wrap makes coincide. *)
+         | CI.ITP_bw_compl -> parensM (build [ rets "-"; aux x; rets "- 1" ])
          | CI.ITP_BW_FFS -> f_appM "CN_Lib.find_first_set_z" [ aux x ]
          | CI.ITP_BW_CTZ -> f_appM "CN_Lib.count_trailing_zeroes_z" [ aux x ])
     | CI.ITP_binop (op, x, y, bt) ->
@@ -362,10 +367,23 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
          | CI.ITP_add -> abinop "+" x y
          | CI.ITP_sub -> abinop "-" x y
          | CI.ITP_mul -> abinop "*" x y
-         | CI.ITP_div -> abinop "/" x y
-         | CI.ITP_mod -> abinop "mod" x y
-         (* todo: rem is definitely not right *)
-         | CI.ITP_rem -> abinop "mod" x y
+         (* Division follows solver.ml: SMT-LIB Euclidean div/mod and Z3's rem
+            for CN integers; truncating sdiv/srem and floor smod for signed
+            bitvectors; plain division for unsigned bitvectors. *)
+         | CI.ITP_div ->
+           (match bt with
+            | CI.ITP_Integer -> f_appM "CN_Lib.div_smt" [ aux x; aux y ]
+            | CI.ITP_Bits (CI.ITP_Signed, _) -> f_appM "Z.quot" [ aux x; aux y ]
+            | _ -> abinop "/" x y)
+         | CI.ITP_mod ->
+           (match bt with
+            | CI.ITP_Integer -> f_appM "CN_Lib.mod_smt" [ aux x; aux y ]
+            | _ -> abinop "mod" x y)
+         | CI.ITP_rem ->
+           (match bt with
+            | CI.ITP_Integer -> f_appM "CN_Lib.rem_smt" [ aux x; aux y ]
+            | CI.ITP_Bits (CI.ITP_Signed, _) -> f_appM "Z.rem" [ aux x; aux y ]
+            | _ -> abinop "mod" x y)
          | CI.ITP_lt -> abinop "<?" x y
          | CI.ITP_lt_prop -> abinop "<" x y
          | CI.ITP_le -> abinop "<=?" x y
@@ -422,7 +440,9 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
       let op_nm = gen_get_upd ix (aux t) in
       parensM (build [ op_nm; aux x ])
     | CI.ITP_cast (bt, (CI.ITP_memory ("addr_of", _) as x)) -> norm_bv_op bt (aux x)
-    | CI.ITP_cast (_, x) -> aux x
+    (* solver.ml bv_cast: extraction/extension is reinterpretation in the
+       target range; casts to CN integers are the identity. *)
+    | CI.ITP_cast (bt, x) -> norm_bv_op bt (aux x)
     | CI.ITP_apply (CI.ITP_sym name, args) ->
       parensM (build ([ Sym.pp name ] @ List.map aux args))
     | CI.ITP_apply_prop (CI.ITP_sym name, args) ->

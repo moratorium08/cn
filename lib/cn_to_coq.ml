@@ -146,9 +146,12 @@ let it_to_itp_ir global it b =
            CI.ITP_unop (CI.ITP_neg_prop, x, bt)
          else
            CI.ITP_unop (CI.ITP_neg, x, bt)
+       | Terms.Negate -> CI.ITP_unop (CI.ITP_negate, x, bt)
+       | Terms.Abs -> CI.ITP_unop (CI.ITP_abs, x, bt)
+       | Terms.BW_Compl -> CI.ITP_unop (CI.ITP_bw_compl, x, bt)
        | Terms.BW_FFS -> CI.ITP_unop (CI.ITP_BW_FFS, x, bt)
        | Terms.BW_CTZ -> CI.ITP_unop (CI.ITP_BW_CTZ, x, bt)
-       | _ -> CI.ITP_unsupported_pure "Unsupported unop")
+       | Terms.BW_CLZ | Terms.BW_FLS -> CI.ITP_unsupported_pure "Unsupported unop")
     | Terms.Binop (op, a, b) ->
       let x = aux a in
       let y = aux b in
@@ -206,6 +209,13 @@ let it_to_itp_ir global it b =
            CI.ITP_binop (CI.ITP_impl, x, y, bt)
        | Min -> CI.ITP_ite (CI.ITP_binop (CI.ITP_lt, x, y, bt), x, y)
        | Max -> CI.ITP_ite (CI.ITP_binop (CI.ITP_lt, x, y, bt), y, x)
+       (* solver.ml: integer shifts are multiplication/SMT division by 2^n. *)
+       | ShiftLeft when BT.equal (Terms.get_bt it) BT.Integer ->
+         let two = CI.ITP_const (CI.ITP_Z (Z.of_int 2)) in
+         CI.ITP_binop (CI.ITP_mul, x, CI.ITP_binop (CI.ITP_exp, two, y, bt), bt)
+       | ShiftRight when BT.equal (Terms.get_bt it) BT.Integer ->
+         let two = CI.ITP_const (CI.ITP_Z (Z.of_int 2)) in
+         CI.ITP_binop (CI.ITP_div, x, CI.ITP_binop (CI.ITP_exp, two, y, bt), bt)
        | ShiftLeft | ShiftRight | SetUnion | SetIntersection | SetDifference | SetMember
        | Subset | BW_CLZ_Z | BW_CTZ_Z | BW_FFS_Z | BW_FLS_Z ->
          CI.ITP_unsupported_pure "Unsupported binop")
@@ -258,7 +268,8 @@ let it_to_itp_ir global it b =
     | Terms.WrapI (ity, arg) ->
       let maxInt = Memory.max_integer_type ity in
       let minInt = Memory.min_integer_type ity in
-      CI.ITP_wrapI (maxInt, minInt, aux arg)
+      (* CN_Lib.wrapI takes the lower bound first. *)
+      CI.ITP_wrapI (minInt, maxInt, aux arg)
     | Terms.Let ((nm, x), y) -> CI.ITP_let_pure (CI.ITP_sym nm, aux x, aux y)
     | Terms.ArrayShift { base; ct; index } ->
       let size_of_ct = Z.of_int @@ Memory.size_of_ctype ct in

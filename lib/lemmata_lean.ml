@@ -232,6 +232,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
         (match op with
          | CI.ITP_neg -> f_appM "!" [ aux x ]
          | CI.ITP_neg_prop -> f_appM "¬" [ aux x ]
+         | CI.ITP_negate -> parensM (build [ rets "-"; aux x ])
+         | CI.ITP_abs | CI.ITP_bw_compl -> rets "unsupported unop in Lean right now"
          | CI.ITP_BW_FFS -> f_appM "CN_Lib.find_first_set_z" [ aux x ]
          | CI.ITP_BW_CTZ -> f_appM "CN_Lib.count_trailing_zeroes_z" [ aux x ])
     | CI.ITP_binop (op, x, y, bt) ->
