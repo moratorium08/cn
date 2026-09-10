@@ -4,25 +4,16 @@ Require Import CN_Lemmas.CN_Memory.
 Open Scope Z_scope.
 
 (* These are memory-model regression proofs, not allocator lemma proofs. *)
-Module BV_VIP64_Config <: CONFIG.
+Module W64 <: WIDTH.
   Definition pointer_bits : nat := 64%nat.
-  Definition bitvectors := true.
-  Definition vip := true.
-End BV_VIP64_Config.
-Module Integer_VIP64_Config <: CONFIG.
-  Definition pointer_bits : nat := 64%nat.
-  Definition bitvectors := false.
-  Definition vip := true.
-End Integer_VIP64_Config.
-Module BV_NoVIP64_Config <: CONFIG.
-  Definition pointer_bits : nat := 64%nat.
-  Definition bitvectors := true.
-  Definition vip := false.
-End BV_NoVIP64_Config.
+End W64.
 
-Module BVVIP := Make BV_VIP64_Config.
-Module IntegerVIP := Make Integer_VIP64_Config.
-Module BVNoVIP := Make BV_NoVIP64_Config.
+Module Bounded64 := BoundedAddress W64.
+Module Integer64 := IntegerAddress W64.
+
+Module BVVIP := Make Bounded64 VIP.
+Module IntegerVIP := Make Integer64 VIP.
+Module BVNoVIP := Make Bounded64 NoVIP.
 
 Lemma offset_cancel_mod (z offset modulus : Z) :
   0 <= z < modulus ->
@@ -85,8 +76,7 @@ Section BV_VIP.
   Proof. discriminate. Qed.
 
   Definition bv_history : BVVIP.History := fun _ =>
-    {| BVVIP.allocation_base := BVVIP.address 4096;
-       BVVIP.allocation_size := BVVIP.address 16 |}.
+    {| allocation_base := 4096; allocation_size := 16 |}.
 
   Lemma bv_vip_one_past_bounds :
     BVVIP.in_bounds bv_history (BVVIP.aia 1 4112).
@@ -139,8 +129,7 @@ Section Integer_VIP.
   Proof. discriminate. Qed.
 
   Definition integer_history : IntegerVIP.History := fun _ =>
-    {| IntegerVIP.allocation_base := IntegerVIP.address 4096;
-       IntegerVIP.allocation_size := IntegerVIP.address 16 |}.
+    {| allocation_base := 4096; allocation_size := 16 |}.
 
   Lemma integer_vip_one_past_bounds :
     IntegerVIP.in_bounds integer_history (IntegerVIP.aia 1 4112).
@@ -189,8 +178,7 @@ Section BV_NoVIP.
   Proof. discriminate. Qed.
 
   Definition novip_history : BVNoVIP.History := fun _ =>
-    {| BVNoVIP.allocation_base := BVNoVIP.address 4096;
-       BVNoVIP.allocation_size := BVNoVIP.address 16 |}.
+    {| allocation_base := 4096; allocation_size := 16 |}.
 
   Lemma bv_novip_one_past_bounds :
     BVNoVIP.in_bounds novip_history (BVNoVIP.aia tt 4112).

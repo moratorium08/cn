@@ -4,12 +4,11 @@ From iris.proofmode Require Import proofmode.
 Require Import CN_Lemmas.CN_Memory_Iris.
 Open Scope Z_scope.
 
-Module IntegerVIP64 <: CONFIG.
+Module W64 <: WIDTH.
   Definition pointer_bits : nat := 64%nat.
-  Definition bitvectors := false.
-  Definition vip := true.
-End IntegerVIP64.
-Module M := CN_Memory_Iris.Make IntegerVIP64.
+End W64.
+Module Integer64 := IntegerAddress W64.
+Module M := CN_Memory_Iris.Make Integer64 VIP.
 Import M M.Memory.
 
 Section Iteration.

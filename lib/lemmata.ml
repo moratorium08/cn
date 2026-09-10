@@ -28,12 +28,14 @@ let header filename =
   ^^ hardline
   ^^ !^"Require Import CN_Lemmas.CN_Memory_Iris."
   ^^ hardline
-  ^^ !^("Module CN_ExportConfig <: CN_Memory.CONFIG.\n"
+  ^^ !^("(* CN's address and provenance modes are separate model modules. *)\n"
+        ^ "Module CN_ExportWidth <: CN_Memory.WIDTH.\n"
         ^ "  Definition pointer_bits := " ^ string_of_int (Memory.size_of_pointer * Memory.bits_per_byte) ^ "%nat.\n"
-        ^ "  Definition bitvectors := " ^ string_of_bool !BT.cnBV ^ ".\n"
-        ^ "  Definition vip := " ^ string_of_bool !MakeTerm.use_vip ^ ".\n"
-        ^ "End CN_ExportConfig.\n"
-        ^ "Module CN_Lib_Iris := CN_Memory_Iris.Make(CN_ExportConfig).\n"
+        ^ "End CN_ExportWidth.\n"
+        ^ "Module CN_ExportAddress := CN_Memory."
+        ^ (if !BT.cnBV then "BoundedAddress" else "IntegerAddress") ^ " CN_ExportWidth.\n"
+        ^ "Module CN_ExportProvenance := CN_Memory." ^ (if !MakeTerm.use_vip then "VIP" else "NoVIP") ^ ".\n"
+        ^ "Module CN_Lib_Iris := CN_Memory_Iris.Make CN_ExportAddress CN_ExportProvenance.\n"
         ^ "Export CN_Lib_Iris CN_Lib_Iris.Memory.")
   ^^ hardline
   ^^ !^"From iris.bi.lib Require Import fixpoint_mono."

@@ -2,49 +2,126 @@ From Stdlib Require Import ZArith Lia.
 From stdpp Require Import countable.
 Open Scope Z_scope.
 
-(* A direct model of solver.ml:CN_AllocId and CN_Pointer.  Wrong-constructor
-   selectors are parameters, as in SMT datatypes, not arbitrarily fixed to 0. *)
-Module Type CONFIG.
-  Parameter pointer_bits : nat.
-  Parameter bitvectors : bool.
-  Parameter vip : bool.
-End CONFIG.
+(* A direct model of solver.ml:CN_AllocId and CN_Pointer.
 
-Module Make (C : CONFIG).
-  Definition modulus : Z := 2 ^ Z.of_nat C.pointer_bits.
+   The two CN switches are separate modules rather than booleans tested inside
+   definitions, so that each mode has exactly the structure CN gives it:
+
+   - ADDRESS: integer mode (Z, no wrapping, resource.ml:derived_lc1 bounds the
+     extent by Memory.max_pointer) or bitvector mode (addresses reduce modulo
+     2^pointer_bits and the extent must not wrap).
+   - PROVENANCE: VIP (allocation IDs are Z, bytes record an optional ID,
+     owned extents must lie inside their allocation) or no-VIP (allocation IDs
+     are unit, bytes record nothing, no allocation bounds).
+
+   Wrong-constructor selectors are parameters, as in SMT datatypes, not
+   arbitrarily fixed to 0. *)
+
+Module Type WIDTH.
+  Parameter pointer_bits : nat.
+End WIDTH.
+
+Module Type ADDRESS.
+  Parameter pointer_bits : nat.
+  Parameter modulus : Z.
+  Parameter modulus_pos : 0 < modulus.
+  Parameter Address : Set.
+  Declare Instance address_eq_dec : EqDecision Address.
+  Declare Instance address_countable : Countable Address.
+  Parameter address : Z -> Address.
+  Parameter address_Z : Address -> Z.
+  (* resource.ml:derived_lc1 "within_addr_space": the owned extent
+     [addr, addr + n) is representable. *)
+  Parameter extent_fits : Z -> Z -> Prop.
+End ADDRESS.
+
+Module IntegerAddress (W : WIDTH) <: ADDRESS.
+  Definition pointer_bits : nat := W.pointer_bits.
+  Definition modulus : Z := 2 ^ Z.of_nat pointer_bits.
   Lemma modulus_pos : 0 < modulus.
   Proof. unfold modulus; apply Z.pow_pos_nonneg; lia. Qed.
+  Definition Address : Set := Z.
+  Global Instance address_eq_dec : EqDecision Address := _.
+  Global Instance address_countable : Countable Address := _.
+  Definition address (z : Z) : Address := z.
+  Definition address_Z (a : Address) : Z := a.
+  (* integer mode: upper <= Memory.max_pointer = 2^bits - 1 *)
+  Definition extent_fits (addr n : Z) : Prop := addr + n <= modulus - 1.
+End IntegerAddress.
 
-  Definition AllocId : Set := if C.vip then Z else unit.
-  Definition Address : Set :=
-    if C.bitvectors then { z : Z | bool_decide (0 <= z < modulus) = true } else Z.
-  Definition Ptr : Set := option (AllocId * Address).
-  Global Instance alloc_id_eq_dec : EqDecision AllocId.
-  Proof. unfold AllocId; destruct C.vip; apply _. Defined.
-  Global Instance alloc_id_countable : Countable AllocId.
-  Proof. unfold alloc_id_eq_dec, AllocId; destruct C.vip; apply _. Defined.
+Module BoundedAddress (W : WIDTH) <: ADDRESS.
+  Definition pointer_bits : nat := W.pointer_bits.
+  Definition modulus : Z := 2 ^ Z.of_nat pointer_bits.
+  Lemma modulus_pos : 0 < modulus.
+  Proof. unfold modulus; apply Z.pow_pos_nonneg; lia. Qed.
+  Definition Address : Set := { z : Z | bool_decide (0 <= z < modulus) = true }.
   Global Instance address_eq_dec : EqDecision Address.
-  Proof. unfold Address; destruct C.bitvectors; apply _. Defined.
+  Proof. apply _. Defined.
   Global Instance address_countable : Countable Address.
-  Proof. unfold address_eq_dec, Address; destruct C.bitvectors; apply _. Defined.
+  Proof. apply _. Defined.
+  Definition address (z : Z) : Address :=
+    exist _ (z mod modulus)
+      (bool_decide_eq_true_2 _ (Z.mod_pos_bound z modulus modulus_pos)).
+  Definition address_Z (a : Address) : Z := proj1_sig a.
+  (* bitvector mode: addr <= upper, where upper wraps *)
+  Definition extent_fits (addr n : Z) : Prop := addr <= address_Z (address (addr + n)).
+End BoundedAddress.
+
+(* alloc.ml:History entries. *)
+Record Allocation := { allocation_base : Z; allocation_size : Z }.
+
+Module Type PROVENANCE.
+  Parameter AllocId : Set.
+  Declare Instance alloc_id_eq_dec : EqDecision AllocId.
+  Declare Instance alloc_id_countable : Countable AllocId.
+  (* CN allocation-ID literals *)
+  Parameter allocation_id : Z -> AllocId.
+  (* what a byte records about the pointer it was stored as part of
+     (solver.ml:CN_MemByte) *)
+  Parameter ByteProv : Set.
+  Declare Instance byte_prov_eq_dec : EqDecision ByteProv.
+  Declare Instance byte_prov_countable : Countable ByteProv.
+  Parameter tagged : AllocId -> ByteProv.
+  (* resource.ml:derived_lc1 allocation bounds for an owned extent
+     [addr, upper], given the allocation's (wrapped) end. *)
+  Parameter alloc_bounds :
+    (AllocId -> Allocation) -> (Allocation -> Z) -> AllocId -> Z -> Z -> Prop.
+End PROVENANCE.
+
+Module VIP <: PROVENANCE.
+  Definition AllocId : Set := Z.
+  Global Instance alloc_id_eq_dec : EqDecision AllocId := _.
+  Global Instance alloc_id_countable : Countable AllocId := _.
+  Definition allocation_id (z : Z) : AllocId := z.
+  Definition ByteProv : Set := option Z.
+  Global Instance byte_prov_eq_dec : EqDecision ByteProv := _.
+  Global Instance byte_prov_countable : Countable ByteProv := _.
+  Definition tagged (a : AllocId) : ByteProv := Some a.
+  Definition alloc_bounds (h : AllocId -> Allocation) (end_of : Allocation -> Z)
+      (a : AllocId) (addr upper : Z) : Prop :=
+    allocation_base (h a) <= addr /\ upper <= end_of (h a).
+End VIP.
+
+Module NoVIP <: PROVENANCE.
+  Definition AllocId : Set := unit.
+  Global Instance alloc_id_eq_dec : EqDecision AllocId := _.
+  Global Instance alloc_id_countable : Countable AllocId := _.
+  Definition allocation_id (_ : Z) : AllocId := tt.
+  Definition ByteProv : Set := unit.
+  Global Instance byte_prov_eq_dec : EqDecision ByteProv := _.
+  Global Instance byte_prov_countable : Countable ByteProv := _.
+  Definition tagged (_ : AllocId) : ByteProv := tt.
+  Definition alloc_bounds (_ : AllocId -> Allocation) (_ : Allocation -> Z)
+      (_ : AllocId) (_ _ : Z) : Prop := True.
+End NoVIP.
+
+Module Make (A : ADDRESS) (P : PROVENANCE).
+  Include A.
+  Include P.
+
+  Definition Ptr : Set := option (AllocId * Address).
   Global Instance ptr_eq_dec : EqDecision Ptr := _.
   Global Instance ptr_countable : Countable Ptr := _.
-
-  Definition address (z : Z) : Address.
-  Proof.
-    unfold Address; destruct C.bitvectors.
-    - refine (exist _ (z mod modulus) _).
-      apply bool_decide_eq_true_2, Z.mod_pos_bound, modulus_pos.
-    - exact z.
-  Defined.
-  Definition address_Z : Address -> Z :=
-    match C.bitvectors as b return (if b then {z : Z | bool_decide (0 <= z < modulus) = true} else Z) -> Z with
-    | true => fun z => proj1_sig z
-    | false => fun z => z
-    end.
-  Definition allocation_id (z : Z) : AllocId :=
-    match C.vip as b return (if b then Z else unit) with
-    | true => z | false => tt end.
 
   Class Selectors := {
     null_alloc_id : AllocId;
@@ -88,19 +165,15 @@ Module Make (C : CONFIG).
 
   (* alloc.ml:History and check.ml:in_bounds.  One-past is allowed for pointer
      arithmetic, but a nonempty Owned footprint must fit before the end. *)
-  Record Allocation := { allocation_base : Address; allocation_size : Address }.
   Definition History := AllocId -> Allocation.
   Definition allocation_end (a : Allocation) : Z :=
-    address_Z (address (address_Z (allocation_base a) + address_Z (allocation_size a))).
+    address_Z (address (allocation_base a + allocation_size a)).
   Definition in_bounds `{Selectors} (h : History) (p : Ptr) : Prop :=
     let a := h (alloc_id_of p) in
-    address_Z (allocation_base a) <= addr_of p <= allocation_end a.
+    allocation_base a <= addr_of p <= allocation_end a.
   Definition footprint_ok `{Selectors} (h : History) (p : Ptr) (n : Z) : Prop :=
     has_alloc_id p = true /\ 0 <= n /\
-    let upper := address_Z (address (addr_of p + n)) in
-    (if C.bitvectors then addr_of p <= upper else upper <= modulus - 1) /\
-    (if C.vip then
-       address_Z (allocation_base (h (alloc_id_of p))) <= addr_of p /\
-       upper <= allocation_end (h (alloc_id_of p))
-     else True).
+    extent_fits (addr_of p) n /\
+    alloc_bounds h allocation_end (alloc_id_of p) (addr_of p)
+      (address_Z (address (addr_of p + n))).
 End Make.

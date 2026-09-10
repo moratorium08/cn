@@ -39,7 +39,7 @@ closed "$work/Memory_Pointer_Tests.log" 23
 # Pointer model, struct ownership and qualified struct projections.
 run_cn verify "$cases/memory.c" --lemmata_coq "$work/proof/Gen_Spec.v" \
   >"$work/export.log" 2>&1
-grep -q 'Definition bitvectors := false' "$work/proof/Gen_Spec.v"
+grep -q 'CN_Memory.IntegerAddress CN_ExportWidth' "$work/proof/Gen_Spec.v"
 grep -q 'memory_probe_only_node' "$work/proof/Gen_Spec.v"
 cp "$proofs/Inst_Spec.v" "$work/proof/"
 compile "$work/proof/Gen_Spec.v"

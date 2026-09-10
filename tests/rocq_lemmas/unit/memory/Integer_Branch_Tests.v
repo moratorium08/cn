@@ -3,12 +3,11 @@ From iris.proofmode Require Import proofmode.
 Require Import CN_Lemmas.CN_Memory_Iris.
 Open Scope Z_scope.
 
-Module IntegerConfig <: CONFIG.
+Module W64 <: WIDTH.
   Definition pointer_bits := 64%nat.
-  Definition bitvectors := false.
-  Definition vip := true.
-End IntegerConfig.
-Module M := CN_Memory_Iris.Make IntegerConfig.
+End W64.
+Module Integer64 := IntegerAddress W64.
+Module M := CN_Memory_Iris.Make Integer64 VIP.
 Import M M.Memory.
 
 Section BranchSemantics.
@@ -17,8 +16,7 @@ Section BranchSemantics.
      non-wrapping Z addition. Follow that exact bound, including its strict
      exclusion of an extent ending at 2^64; do not silently relax it. *)
   Definition full_history : History := fun _ =>
-    {| allocation_base := address 0;
-       allocation_size := address (2^64) |}.
+    {| allocation_base := 0; allocation_size := 2^64 |}.
 
   Lemma integer_footprint_inside_address_space :
     footprint_ok full_history (aia 1 (2^64 - 2)) 1.

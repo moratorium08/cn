@@ -23,7 +23,7 @@ Module InstOK <: Lemma_Spec(Inst).
       unfold D.ptr_eq, Memory.ptr_eq. apply bool_decide_spec.
       unfold arrayshift, ptr_shift, aia, alloc_id_of, raw_address.
       f_equal. f_equal.
-      cbv [address address_Z Address CN_ExportConfig.bitvectors] in *. lia.
+      cbv [address address_Z Address] in *. lia.
     Qed.
 
     Lemma shift_preserves_provenance : ⊢ shift_preserves_provenance_type.
@@ -55,7 +55,7 @@ Module InstOK <: Lemma_Spec(Inst).
       unfold alloc_id_eq in Hi. apply bool_decide_spec in Hi.
       simpl in Hi. subst qa.
       unfold addr_eq in Ha. apply Is_true_eq_true in Ha. apply Z.eqb_eq in Ha.
-      cbv [addr_of address_Z Address CN_ExportConfig.bitvectors] in *. subst qz.
+      cbv [addr_of address_Z Address] in *. subst qz.
       unfold D.ptr_eq, Memory.ptr_eq. apply bool_decide_spec. reflexivity.
     Qed.
 

@@ -30,7 +30,7 @@ Module InstOK: CN_Lemmas.Gen_Spec.Lemma_Spec(Inst).
     Proof.
       destruct p as [[aid a]|]; unfold arrayshift, ptr_shift, aia,
         alloc_id_of, raw_address;
-        cbv [address address_Z Address CN_ExportConfig.bitvectors];
+        cbv [address address_Z Address];
         f_equal; f_equal; lia.
     Qed.
 
@@ -39,7 +39,7 @@ Module InstOK: CN_Lemmas.Gen_Spec.Lemma_Spec(Inst).
     Proof.
       destruct p as [[aid a]|]; last (intros []).
       intros _. unfold arrayshift, ptr_shift, aia, alloc_id_of, raw_address.
-      cbv [address address_Z Address CN_ExportConfig.bitvectors].
+      cbv [address address_Z Address].
       f_equal; f_equal; lia.
     Qed.
 
