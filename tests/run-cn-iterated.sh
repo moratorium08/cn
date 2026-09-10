@@ -65,6 +65,22 @@ grep -q 'Unsupported use of iterated W output' "$work/rejected.log"
 cmp "$work/proof/IteratedInteger.v" "$work/protected.v"
 printf 'PASS: 13 model theorems, 3 integer-mode exported proofs, W-output rejection.\n'
 
+# --no-vip is how the pKVM allocator is verified: the config must say
+# vip := false (AllocId = unit) and the same proofs must still close.
+mkdir -p "$work/novip"
+run_cn "$cn" verify "$cases/iterated_integer.c" --no-vip \
+  --lemmata_coq "$work/novip/IteratedInteger.v" >"$work/novip-export.log" 2>&1
+grep -q 'Definition vip := false' "$work/novip/IteratedInteger.v"
+cp "$proofs/IteratedInteger_Proof.v" "$work/novip/"
+run_rocq compile -Q "$work/lib" CN_Lemmas -Q "$work/novip" IteratedExport \
+  "$work/novip/IteratedInteger.v" >"$work/novip/IteratedInteger.log" 2>&1 ||
+  { cat "$work/novip/IteratedInteger.log"; exit 1; }
+run_rocq compile -Q "$work/lib" CN_Lemmas -Q "$work/novip" IteratedExport \
+  "$work/novip/IteratedInteger_Proof.v" >"$work/novip/IteratedInteger_Proof.log" 2>&1 ||
+  { cat "$work/novip/IteratedInteger_Proof.log"; exit 1; }
+closed "$work/novip/IteratedInteger_Proof.log" 3
+printf 'PASS: 3 integer-mode exported proofs under --no-vip.\n'
+
 if [[ -n ${BITVECTOR_CN:-} ]]; then
   run_cn "$BITVECTOR_CN" verify "$cases/iterated_bitvector.c" \
     --lemmata_coq "$work/proof/IteratedBitvector.v" >"$work/bitvector-export.log" 2>&1
