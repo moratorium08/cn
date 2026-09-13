@@ -96,28 +96,17 @@ let upd_loc_state state ix v =
 
 let triv_simp_ctxt = Simplify.default Global.empty
 
-let simp_const loc lpp it =
-  let it2 = Simplify.Terms.simp triv_simp_ctxt it in
-  match (Terms.is_z it2, Terms.get_bt it2) with
-  | Some _z, _ -> return it2
-  | _, BT.Integer ->
-    fail_n
-      { loc;
-        msg =
-          Generic
-            (Pp.item
-               "getting expr from C syntax: failed to simplify integer to numeral"
-               (Pp.typ (Lazy.force lpp) (T.pp it2)))
-          [@alert "-deprecated"]
-      }
-  | _, _ -> return it2
+let simp_const _loc _lpp it =
+  return (Simplify.Terms.simp triv_simp_ctxt it)
 
 
 let do_wrapI loc ct it =
   match Sctypes.is_integer_type ct with
   | Some ity ->
     let ity_bt = Memory.bt_of_sct ct in
-    if BT.equal ity_bt (Terms.get_bt it) then
+    if (not !BT.cnBV) then
+      return (MT.wrapI_ (ity, it) loc)
+    else if BT.equal ity_bt (Terms.get_bt it) then
       return it
     else
       return (MT.wrapI_ (ity, it) loc)
@@ -398,8 +387,8 @@ let rec symb_exec_pexpr ctxt var_map pexpr =
       | IOpShl -> MT.arith_binop Terms.ShiftLeft (x, MT.cast_ (Terms.get_bt x) y here) loc
       | IOpShr ->
         MT.arith_binop Terms.ShiftRight (x, MT.cast_ (Terms.get_bt x) y here) loc
-      | IOpDiv -> failwith "TODO division operator"
-      | IOpRem_t -> failwith "TODO remainder operator"
+      | IOpDiv -> MT.div_ (x, y) loc
+      | IOpRem_t -> MT.rem_ (x, y) loc
     in
     do_wrapI loc (Integer ity) it
   | PEcfunction pe ->
@@ -789,8 +778,6 @@ let add_logical_funs_from_c call_funinfo funs_to_convert funs =
   let@ conv_defs =
     ListM.mapM
       (fun Mu.{ c_fun_sym; loc; l_fun_sym } ->
-         if not !BT.cnBV then
-           failwith "todo: deriving CN function from C function in integer-mode";
          let@ def = Global.get_logical_function_def loc l_fun_sym in
          let@ fbody =
            match Pmap.lookup c_fun_sym funs with

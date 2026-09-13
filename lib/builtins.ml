@@ -146,6 +146,27 @@ let addr_eq_def : builtin_fn_def =
   definition "addr_eq" [ left; right ] body
 
 
+(* Marker used by the integer/BV hybrid experiment.  In ordinary term
+   positions this is just a Boolean-valued builtin.  The checker gives
+   `instantiate reveal_bv, e` its experimental meaning: expose the real SMT
+   definitions of the otherwise-uninterpreted Int/BV conversions occurring
+   in [e]. *)
+let reveal_bv_def : builtin_fn_def =
+  let arg = (Sym.fresh "arg", BT.Integer) in
+  ( "reveal_bv",
+    Sym.fresh "reveal_bv",
+    Definition.Function.
+      { loc; emit_coq = false; args = [ arg ]; body = Uninterp; return_bt = BT.Bool } )
+
+
+let reveal_bv_sym =
+  let _, sym, _ = reveal_bv_def in
+  sym
+
+
+let is_reveal_bv_sym sym = Sym.equal sym reveal_bv_sym
+
+
 (* The remaining functions in this file, from here until array_to_list_def cannot yet be translated to
    LogicalFunction.definition types because they implicitly require basetype polymorphism.
    For example, the `mod` function allows inputs of any sign and size, but such a function cannot be defined
@@ -219,7 +240,8 @@ let builtin_funs
 
 
 let builtin_fun_defs =
-  max_min_bits @ [ not_def; is_null_def; ptr_eq_def; prov_eq_def; addr_eq_def ]
+  max_min_bits
+  @ [ not_def; is_null_def; ptr_eq_def; prov_eq_def; addr_eq_def; reveal_bv_def ]
 
 
 let apply_builtin_funs fsym args loc =
