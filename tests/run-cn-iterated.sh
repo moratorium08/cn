@@ -111,6 +111,13 @@ if [[ -n ${BITVECTOR_CN:-} ]]; then
   compile "$work/proof/IteratedBitvector.v"
   compile "$work/proof/IteratedBitvector_Proof.v"
   closed "$work/proof/IteratedBitvector_Proof.log" 5
+  cp "$work/proof/IteratedBitvector.v" "$work/protected.v"
+  if run_cn "$BITVECTOR_CN" verify "$cases/iterated_w_output_bitvector.c" \
+      --lemmata_coq "$work/protected.v" >"$work/bitvector-w-output.log" 2>&1; then
+    echo 'Expected bitvector W ghost output without range constraints to fail'; exit 1
+  fi
+  grep -q 'Unsupported bitvector W ghost output' "$work/bitvector-w-output.log"
+  cmp "$work/proof/IteratedBitvector.v" "$work/protected.v"
   printf 'PASS: 5 bitvector-mode exported proofs.\n'
 else
   echo 'SKIP: bitvector frontend export checks (set BITVECTOR_CN).'

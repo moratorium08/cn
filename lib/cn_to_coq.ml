@@ -373,6 +373,14 @@ let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used contin
   | Request.PName _ ->
     CI.ITP_Unsupported_Resource "Unsupported iterated named resource predicate"
   | Request.Owned (ct, init) ->
+    (* Bitvector map codomains are currently printed as Z without global
+       range constraints. Do not allow existential W outputs to choose values
+       outside their CN type. The supported integers frontend has no such
+       implicit finite-width constraint on uninitialized logical values. *)
+    (match init with
+     | Request.Uninit when used && !BT.cnBV ->
+       failwith "Unsupported bitvector W ghost output (missing value-range constraints)"
+     | _ -> ());
     let body =
       match init with
       | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, pointer)
