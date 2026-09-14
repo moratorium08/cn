@@ -3,6 +3,7 @@
 void from_bytes(int *p)
 /*@ 
 requires 
+    good<int *>(p);
     take X = each (integer i; 0 <= i && i < sizeof<int>) { W(array_shift<byte>(p, i)) };
 ensures
     take Y = W(p);

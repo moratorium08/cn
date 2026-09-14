@@ -1,0 +1,20 @@
+tests/cn/from_bytes_alignment_w.error.c:8:17: warning: annotation on array_shift suggests p has type byte* but it has type char*.
+        W<byte>(array_shift<byte>(p, i))
+                ^~~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_w.error.c:13:9: warning: experimental keyword 'from_bytes' (use of experimental features is discouraged)
+    /*@ from_bytes W<unsigned long long>(p); @*/
+        ^~~~~~~~~~ 
+tests/cn/from_bytes_alignment_w.error.c:13:9: warning: annotation on W suggests read_&p0 has type unsigned long_long* but it has type char*.
+    /*@ from_bytes W<unsigned long long>(p); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_w.error.c:10:22: warning: annotation on W suggests p has type unsigned long_long* but it has type char*.
+ensures take value = W<unsigned long long>(p);
+                     ^~~~~~~~~~~~~~~~~~~~~ 
+[1/1]: missing_alignment -- fail
+tests/cn/from_bytes_alignment_w.error.c:13:9: error: Unprovable constraint
+    /*@ from_bytes W<unsigned long long>(p); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+Constraint from from_bytes requires a suitably aligned pointer tests/cn/from_bytes_alignment_w.error.c:13:9:
+    /*@ from_bytes W<unsigned long long>(p); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+State file: file:///tmp/state__from_bytes_alignment_w.error.c__missing_alignment.html

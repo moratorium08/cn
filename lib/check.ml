@@ -2375,15 +2375,32 @@ let rec check_expr labels (e : BT.t Mu.expr) (k : T.t -> unit m) : unit m =
             (Access From_bytes)
             (bytes_qpred q_sym ct pointer init, None)
         in
+        (* Reinterpreting bytes cannot establish alignment. Check this after
+           obtaining the bytes (which can unfold source predicates), but before
+           adding the typed resource or any facts derived from its value. *)
+        let constr = LC.T (MT.good_pointer ~pointee_ct:ct pointer loc) in
+        let@ provable = provable loc in
+        let@ () =
+          match provable constr with
+          | `True -> return ()
+          | `False ->
+            let@ model = model () in
+            fail (fun ctxt ->
+              { loc;
+                msg =
+                  Unproven_constraint
+                    { constr;
+                      info = (loc, Some "from_bytes requires a suitably aligned pointer");
+                      requests = [];
+                      ctxt;
+                      model
+                    }
+              })
+        in
         let value_bt = Memory.bt_of_sct ct in
         let value_sym, value = MT.fresh_named value_bt "value" here in
         let@ () = add_a value_sym value_bt (loc, lazy (Pp.string "value from bytes")) in
         let@ () = add_r loc (P (bytes_pred ct pointer init), O value) in
-        let@ () =
-          (* TODO - why is this constraint necessary here? *)
-          (* TODO - this looks unsound, in fact *)
-          add_c here (LC.T (MT.good_pointer ~pointee_ct:ct pointer here))
-        in
         (match init with
          | Uninit -> add_c loc (LC.T (MT.eq_ (value, default_ value_bt here) here))
          | Init ->

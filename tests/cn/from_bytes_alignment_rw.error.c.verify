@@ -1,0 +1,32 @@
+tests/cn/from_bytes_alignment_rw.error.c:13:9: warning: experimental keyword 'to_bytes' (use of experimental features is discouraged)
+    /*@ to_bytes RW<unsigned>(a); @*/
+        ^~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:23:9: warning: experimental keyword 'from_bytes' (use of experimental features is discouraged)
+    /*@ from_bytes RW<unsigned long long>(a); @*/
+        ^~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:23:9: warning: annotation on RW suggests read_&a1 has type unsigned long_long* but it has type unsigned int*.
+    /*@ from_bytes RW<unsigned long long>(a); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:10:22: warning: annotation on RW suggests a has type unsigned long_long* but it has type unsigned int*.
+ensures take value = RW<unsigned long long>(a);
+                     ^~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:19:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 4; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:20:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 5; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:21:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 6; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment_rw.error.c:22:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 7; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+[1/1]: missing_alignment -- fail
+tests/cn/from_bytes_alignment_rw.error.c:23:9: error: Unprovable constraint
+    /*@ from_bytes RW<unsigned long long>(a); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+Constraint from from_bytes requires a suitably aligned pointer tests/cn/from_bytes_alignment_rw.error.c:23:9:
+    /*@ from_bytes RW<unsigned long long>(a); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+State file: file:///tmp/state__from_bytes_alignment_rw.error.c__missing_alignment.html

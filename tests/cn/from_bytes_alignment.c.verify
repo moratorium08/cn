@@ -1,0 +1,30 @@
+tests/cn/from_bytes_alignment.c:8:17: warning: annotation on array_shift suggests p has type byte* but it has type unsigned long_long*.
+        W<byte>(array_shift<byte>(p, i))
+                ^~~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:13:9: warning: experimental keyword 'from_bytes' (use of experimental features is discouraged)
+    /*@ from_bytes W<unsigned long long>(p); @*/
+        ^~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:20:9: warning: experimental keyword 'to_bytes' (use of experimental features is discouraged)
+    /*@ to_bytes RW<unsigned long long>(p); @*/
+        ^~~~~~~~ 
+tests/cn/from_bytes_alignment.c:46:9: warning: annotation on RW suggests read_&a1 has type unsigned long_long* but it has type unsigned int*.
+    /*@ from_bytes RW<unsigned long long>(a); @*/
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:32:22: warning: annotation on RW suggests a has type unsigned long_long* but it has type unsigned int*.
+ensures take value = RW<unsigned long long>(a);
+                     ^~~~~~~~~~~~~~~~~~~~~~ 
+[1/3]: aligned_from_bytes -- pass
+[2/3]: aligned_roundtrip -- pass
+tests/cn/from_bytes_alignment.c:42:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 4; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:43:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 5; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:44:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 6; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+tests/cn/from_bytes_alignment.c:45:9: warning: focus: index added, no effect on existing resources (yet).
+    /*@ focus RW<byte>, 7; @*/
+        ^~~~~~~~~~~~~~~~~~ 
+[3/3]: aligned_join -- pass
