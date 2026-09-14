@@ -57,14 +57,21 @@ compile "$work/proof/IteratedInteger.v"
 compile "$work/proof/IteratedInteger_Proof.v"
 closed "$work/proof/IteratedInteger_Proof.log" 3
 
-cp "$work/proof/IteratedInteger.v" "$work/protected.v"
-if run_cn "$cn" verify "$cases/iterated_w_output.c" \
-    --lemmata_coq "$work/protected.v" >"$work/rejected.log" 2>&1; then
-  echo 'Expected iterated W output use to be rejected'; exit 1
-fi
-grep -q 'Unsupported use of iterated W output' "$work/rejected.log"
-cmp "$work/proof/IteratedInteger.v" "$work/protected.v"
-printf 'PASS: 13 model theorems, 3 integer-mode exported proofs, W-output rejection.\n'
+# W maps must be bound in all three resource contexts, without constraining
+# their values to zero or relating them to readable initialized contents.
+run_cn "$cn" verify "$cases/iterated_w_ghost.c" \
+  --lemmata_coq "$work/proof/WGhost.v" >"$work/w-ghost-export.log" 2>&1
+cp "$proofs/WGhost_Proof.v" "$work/proof/"
+compile "$work/proof/WGhost.v"
+compile "$work/proof/WGhost_Proof.v"
+closed "$work/proof/WGhost_Proof.log" 4
+run_cn "$cn" verify "$cases/iterated_w_output.c" \
+  --lemmata_coq "$work/proof/WOutput.v" >"$work/w-output-export.log" 2>&1
+cp "$proofs/WOutput_Obstruction.v" "$work/proof/"
+compile "$work/proof/WOutput.v"
+compile "$work/proof/WOutput_Obstruction.v"
+closed "$work/proof/WOutput_Obstruction.log" 1
+printf 'PASS: 13 model theorems, 3 integer-mode + 4 W ghost-map proofs, zero-output obstruction.\n'
 
 # --no-vip is how the pKVM allocator is verified: the export must select the
 # NoVIP provenance module (AllocId = unit) and the same proofs must still close.
@@ -81,6 +88,17 @@ run_rocq compile -Q "$work/lib" CN_Lemmas -Q "$work/novip" IteratedExport \
   { cat "$work/novip/IteratedInteger_Proof.log"; exit 1; }
 closed "$work/novip/IteratedInteger_Proof.log" 3
 printf 'PASS: 3 integer-mode exported proofs under --no-vip.\n'
+
+run_cn "$cn" verify "$cases/iterated_w_ghost.c" --no-vip \
+  --lemmata_coq "$work/novip/WGhost.v" >"$work/novip-w-ghost-export.log" 2>&1
+cp "$proofs/WGhost_Proof.v" "$work/novip/"
+for file in WGhost WGhost_Proof; do
+  run_rocq compile -Q "$work/lib" CN_Lemmas -Q "$work/novip" IteratedExport \
+    "$work/novip/$file.v" >"$work/novip/$file.log" 2>&1 ||
+    { cat "$work/novip/$file.log"; exit 1; }
+done
+closed "$work/novip/WGhost_Proof.log" 4
+printf 'PASS: 4 W ghost-map proofs under --no-vip.\n'
 
 if [[ -n ${BITVECTOR_CN:-} ]]; then
   run_cn "$BITVECTOR_CN" verify "$cases/iterated_bitvector.c" \

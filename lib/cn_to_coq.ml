@@ -340,9 +340,12 @@ let scalar_resource gl nm ct init ptr =
   | Request.Init -> CI.ITP_scalar (owned_name ct, it_to_itp_ir gl ptr None, CI.ITP_sym nm)
   | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, it_to_itp_ir gl ptr None)
 
-(* W's output is not an initialized value. Until its ghost output semantics
-   are implemented, only erase a binding if it is genuinely unused. Never
-   invent a map of zeroes/None, or leave an unbound Rocq identifier behind. *)
+(* W outputs are unconstrained logical values, not readable heap contents.
+   compile.ml assigns W the pointee's result type (and each W a map thereof),
+   without the representability constraints of RW. resourceInference.ml may
+   preserve such outputs when splitting/merging or forgetting RW ownership.
+   Quantify used outputs just like RW outputs, but do not relate them to bytes
+   or replace them by a constant map. Unused W binders can still be erased. *)
 let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used continuation =
   let index_sym, index_bt = q.q in
   let index = CI.ITP_sym_term (CI.ITP_sym index_sym) in
@@ -370,10 +373,6 @@ let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used contin
   | Request.PName _ ->
     CI.ITP_Unsupported_Resource "Unsupported iterated named resource predicate"
   | Request.Owned (ct, init) ->
-    (match init with
-     | Request.Uninit when used ->
-       failwith "Unsupported use of iterated W output (unspecified ghost map)"
-     | _ -> ());
     let body =
       match init with
       | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, pointer)
@@ -394,8 +393,8 @@ let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used contin
       else CI.ITP_Star (resource, continuation)
     in
     match init with
-    | Request.Uninit -> result
-    | Request.Init ->
+    | Request.Uninit when not used -> result
+    | Request.Uninit | Request.Init ->
       if requires then CI.ITP_Forall (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
       else CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
 
