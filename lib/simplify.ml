@@ -269,9 +269,11 @@ module Terms = struct
         let a = aux a in
         let b = aux b in
         (match (a, b) with
-         | IT (Const (Z a), _, _), IT (Const (Z b), _, _) when Z.lt Z.zero b ->
-           z_ (Z.div a b) the_loc
-         | IT (Const (Z a), _, _), _ when Z.equal a Z.zero -> int_ 0 the_loc
+         | IT (Const (Z a), _, _), IT (Const (Z b), _, _) when not (Z.equal b Z.zero) ->
+           (* Integer Div is SMT-LIB Euclidean division, including negative
+              dividends/divisors. Zarith's div truncates towards zero.
+              Leave division by zero symbolic, as the solver does. *)
+           z_ (Z.ediv a b) the_loc
          | _, IT (Const (Z b), _, _) when Z.equal b Z.one -> a
          | _ -> IT (Binop (Div, a, b), the_bt, the_loc))
       | Binop (Exp, a, b) ->

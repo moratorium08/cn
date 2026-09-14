@@ -1,0 +1,8 @@
+[1/1]: integer_division_zero -- fail
+tests/cn/integer_division_zero.error.c:4:9: error: Unprovable constraint
+    /*@ assert (0 / 0 == 0); @*/
+        ^~~~~~~~~~~~~~~~~~~~ 
+Constraint from tests/cn/integer_division_zero.error.c:4:9:
+    /*@ assert (0 / 0 == 0); @*/
+        ^~~~~~~~~~~~~~~~~~~~ 
+State file: file:///tmp/state__integer_division_zero.error.c__integer_division_zero.html

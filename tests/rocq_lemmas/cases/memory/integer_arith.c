@@ -9,6 +9,7 @@ lemma euclidean_division(integer a, integer b)
 lemma negative_divisor_division()
   requires true;
   ensures (-7) / (-2) == 4; mod(-7, -2) == 1; rem(-7, -2) == -1;
+    (-7) / 2 == -4; 7 / (-2) == -3;
     mod(-7, 2) == 1; rem(-7, 2) == 1;
 
 lemma remainder_sign_follows_divisor(integer a, integer b)
