@@ -219,6 +219,7 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     let bool_binop t = parensM (build [ rets "decide"; t ]) in
     match t with
     | CI.ITP_sym_term (CI.ITP_sym s) -> Sym.pp s
+    | CI.ITP_pure_forall _ -> failwith "Ghost type constraints require the Rocq exporter"
     | ITP_const c ->
       (match c with
        | ITP_bool b -> rets (if b then "true" else "false")
@@ -343,7 +344,11 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
     let args = List.map aux iargs in
     build ((Sym.pp pname :: aux ptr :: args) @ [ Sym.pp nm ])
   | CI.ITP_Good -> rets ""
-  | CI.ITP_scalar _ | CI.ITP_owned_value _ | CI.ITP_block_sized _ | CI.ITP_each_resource _ ->
+  | CI.ITP_named_value _
+  | CI.ITP_scalar _
+  | CI.ITP_owned_value _
+  | CI.ITP_block_sized _
+  | CI.ITP_each_resource _ ->
     failwith "Typed memory resources are currently supported only by the Rocq exporter"
   | CI.ITP_Unsupported_Resource msg -> rets msg
 

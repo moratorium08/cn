@@ -100,6 +100,20 @@ done
 closed "$work/novip/WGhost_Proof.log" 4
 printf 'PASS: 4 W ghost-map proofs under --no-vip.\n'
 
+# Named predicates may own nothing at NULL. Recursive calls inside each
+# must also satisfy the generated monotonicity and induction obligations.
+for mode in vip novip; do
+  flags=()
+  if [[ $mode == novip ]]; then flags=(--no-vip); fi
+  run_cn "$cn" verify "${flags[@]}" "$cases/iterated_named.c" \
+    --lemmata_coq "$work/proof/IteratedNamed.v" >"$work/$mode-named-export.log" 2>&1
+  cp "$proofs/IteratedNamed_Proof.v" "$work/proof/"
+  compile "$work/proof/IteratedNamed.v"
+  compile "$work/proof/IteratedNamed_Proof.v"
+  closed "$work/proof/IteratedNamed_Proof.log" 5
+  printf 'PASS: 5 iterated named-predicate proofs (%s).\n' "$mode"
+done
+
 if [[ -n ${BITVECTOR_CN:-} ]]; then
   run_cn "$BITVECTOR_CN" verify "$cases/iterated_bitvector.c" \
     --lemmata_coq "$work/proof/IteratedBitvector.v" >"$work/bitvector-export.log" 2>&1
@@ -111,14 +125,24 @@ if [[ -n ${BITVECTOR_CN:-} ]]; then
   compile "$work/proof/IteratedBitvector.v"
   compile "$work/proof/IteratedBitvector_Proof.v"
   closed "$work/proof/IteratedBitvector_Proof.log" 5
-  cp "$work/proof/IteratedBitvector.v" "$work/protected.v"
-  if run_cn "$BITVECTOR_CN" verify "$cases/iterated_w_output_bitvector.c" \
-      --lemmata_coq "$work/protected.v" >"$work/bitvector-w-output.log" 2>&1; then
-    echo 'Expected bitvector W ghost output without range constraints to fail'; exit 1
-  fi
-  grep -q 'Unsupported bitvector W ghost output' "$work/bitvector-w-output.log"
-  cmp "$work/proof/IteratedBitvector.v" "$work/protected.v"
-  printf 'PASS: 5 bitvector-mode exported proofs.\n'
+  for mode in vip novip; do
+    flags=()
+    if [[ $mode == novip ]]; then flags=(--no-vip); fi
+    run_cn "$BITVECTOR_CN" verify "${flags[@]}" "$cases/iterated_w_ranges_bitvector.c" \
+      --lemmata_coq "$work/proof/WBitvector.v" >"$work/$mode-w-bitvector-export.log" 2>&1
+    cp "$proofs/WBitvector_Proof.v" "$work/proof/"
+    compile "$work/proof/WBitvector.v"
+    compile "$work/proof/WBitvector_Proof.v"
+    closed "$work/proof/WBitvector_Proof.log" 4
+    run_cn "$BITVECTOR_CN" verify "${flags[@]}" "$cases/iterated_w_output_bitvector.c" \
+      --lemmata_coq "$work/proof/WBitvectorOutput.v" >"$work/$mode-bitvector-w-output.log" 2>&1
+    cp "$proofs/WBitvector_Obstruction.v" "$work/proof/"
+    compile "$work/proof/WBitvectorOutput.v"
+    compile "$work/proof/WBitvector_Obstruction.v"
+    closed "$work/proof/WBitvector_Obstruction.log" 1
+    printf 'PASS: 4 bitvector W range proofs and zero-output obstruction (%s).\n' "$mode"
+  done
+  printf 'PASS: 5 existing bitvector-mode exported proofs.\n'
 else
   echo 'SKIP: bitvector frontend export checks (set BITVECTOR_CN).'
 fi

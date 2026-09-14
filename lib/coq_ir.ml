@@ -108,6 +108,7 @@ type itp_binop =
 type itp_pure_term =
   | ITP_sym_term of itp_sym
   | ITP_const of itp_const
+  | ITP_pure_forall of itp_sym * itp_bt * itp_pure_term
   | ITP_unop of itp_unop * itp_pure_term * itp_bt
   | ITP_binop of itp_binop * itp_pure_term * itp_pure_term * itp_bt
   | ITP_match of itp_pure_term * (itp_pat * itp_pure_term) list
@@ -150,6 +151,7 @@ type itp_resource_term =
   | ITP_Owned of string * itp_pure_term * itp_sym * itp_resource_term
   | ITP_Block of itp_sym * itp_bt * itp_resource_term * itp_pure_term
   | ITP_PName of itp_sym * itp_sym * itp_pure_term list * itp_pure_term
+  | ITP_named_value of itp_sym * itp_pure_term * itp_pure_term list * itp_pure_term
   | ITP_Empty_Heap
   | ITP_scalar of string * itp_pure_term * itp_sym
   | ITP_owned_value of string * itp_pure_term * itp_pure_term

@@ -346,6 +346,8 @@ let term_to_itp (global : Global.t) (t : CI.itp_pure_term) =
     let abinop s x y = parensM (build [ aux x; rets s; aux y ]) in
     match t with
     | CI.ITP_sym_term (CI.ITP_sym s) -> pp_sym s
+    | CI.ITP_pure_forall (CI.ITP_sym sym, bt, body) ->
+      parensM (pp_forall sym bt (aux body))
     | ITP_const c ->
       (match c with
        | ITP_bool b -> rets (if b then "true" else "false")
@@ -523,6 +525,10 @@ let rec resource_to_itp (global : Global.t) (t : CI.itp_resource_term) =
   | CI.ITP_PName (CI.ITP_sym nm, CI.ITP_sym pname, iargs, ptr) ->
     let args = List.map aux iargs in
     build ((pp_sym pname :: aux ptr :: args) @ [ pp_sym nm ])
+  | CI.ITP_named_value (CI.ITP_sym pname, ptr, iargs, value) ->
+    build
+      ((pp_sym pname :: parens (aux ptr) :: List.map (fun x -> parens (aux x)) iargs)
+       @ [ parens (aux value) ])
   | CI.ITP_Good -> rets ""
   | CI.ITP_Unsupported_Resource msg -> rets msg
 
@@ -766,7 +772,8 @@ let translate_pred (gl : Global.t) (preds : CI.itp_resource_pred_group list) =
       ^^ parens
            (build
               [ !^"unfold";
-                intersperse "," "" @@ List.map (fun p -> !^(get_body_name p)) predicates
+                intersperse "," ""
+                @@ (List.map (fun p -> !^(get_body_name p)) predicates @ [ !^"each_resource" ])
               ])
     in
     let tactic =

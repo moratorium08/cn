@@ -1,5 +1,5 @@
-/* A finite-width ghost map needs codomain range constraints. Until those
- * are exported, reject it rather than allow an arbitrary Z-valued witness. */
+/* Even a finite-width W ghost map is arbitrary within its type range.
+ * This false zero claim must remain unprovable. */
 /*@
 lemma unsupported_w_ghost(pointer p)
   requires take before = each (u64 i; i == 0u64) {

@@ -340,7 +340,61 @@ let scalar_resource gl nm ct init ptr =
   | Request.Init -> CI.ITP_scalar (owned_name ct, it_to_itp_ir gl ptr None, CI.ITP_sym nm)
   | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, it_to_itp_ir gl ptr None)
 
-(* W outputs are unconstrained logical values, not readable heap contents.
+(* The Rocq representation of bitvectors is Z, including under map and
+   struct constructors. Reintroduce the CN base-type invariant on the entire
+   logical value, independently of the permission of a particular resource. *)
+let rec ghost_type_constraint gl bt value =
+  let open CI in
+  let binary op x y = ITP_binop (op, x, y, ITP_Bool) in
+  let conjunction xs =
+    match List.filter_map Fun.id xs with
+    | [] -> None
+    | x :: xs -> Some (List.fold_left (binary ITP_and_prop) x xs)
+  in
+  match bt with
+  | BT.Bits (sign, width) ->
+    let lo, hi = BT.bits_range (sign, width) in
+    let z n = ITP_const (ITP_Z n) in
+    Some
+      (binary
+         ITP_and_prop
+         (binary ITP_le_prop (z lo) value)
+         (binary ITP_le_prop value (z hi)))
+  | BT.Map (key_bt, item_bt) ->
+    let key = ITP_sym (Sym.fresh_make_uniq "cn_ghost_index") in
+    let index = ITP_sym_term key in
+    Option.map
+      (fun item_constraint ->
+        let body =
+          match ghost_type_constraint gl key_bt index with
+          | None -> item_constraint
+          | Some guard -> binary ITP_impl_prop guard item_constraint
+        in
+        ITP_pure_forall (key, bt_to_itp_ir gl key_bt, body))
+      (ghost_type_constraint gl item_bt (ITP_mapget (value, index)))
+  | BT.Struct tag ->
+    let fields, bts = get_struct_xs gl.struct_decls tag in
+    List.mapi
+      (fun i (field, field_bt) ->
+        let field = Id.make (Id.get_loc field) (CI.struct_field_name tag field) in
+        ghost_type_constraint gl field_bt
+          (ITP_structmember (value, ITP_id field, (i, List.length fields))))
+      (List.combine fields bts)
+    |> conjunction
+  | BT.Record fields ->
+    List.mapi
+      (fun i (field, field_bt) ->
+        ghost_type_constraint
+          gl
+          field_bt
+          (ITP_recordmember (value, ITP_id field, (i, List.length fields))))
+      fields
+    |> conjunction
+  | BT.Integer | BT.Unit | BT.Bool | BT.Loc () | BT.Alloc_id -> None
+  | _ -> failwith "Unsupported W ghost output base type"
+
+(* W outputs are arbitrary logical values within their CN base type, not
+   readable heap contents.
    compile.ml assigns W the pointee's result type (and each W a map thereof),
    without the representability constraints of RW. resourceInference.ml may
    preserve such outputs when splitting/merging or forgetting RW ownership.
@@ -369,42 +423,47 @@ let iterated_resource gl nm bt (q : Request.QPredicate.t) ~requires ~used contin
           z (Z.of_int (Memory.size_of_ctype q.step));
           index ] )
   in
-  match q.name with
-  | Request.PName _ ->
-    CI.ITP_Unsupported_Resource "Unsupported iterated named resource predicate"
-  | Request.Owned (ct, init) ->
-    (* Bitvector map codomains are currently printed as Z without global
-       range constraints. Do not allow existential W outputs to choose values
-       outside their CN type. The supported integers frontend has no such
-       implicit finite-width constraint on uninitialized logical values. *)
-    (match init with
-     | Request.Uninit when used && !BT.cnBV ->
-       failwith "Unsupported bitvector W ghost output (missing value-range constraints)"
-     | _ -> ());
-    let body =
-      match init with
-      | Request.Uninit -> CI.ITP_block_sized (Memory.size_of_ctype ct, pointer)
-      | Request.Init ->
-        CI.ITP_owned_value
-          (owned_name ct, pointer, CI.ITP_mapget (CI.ITP_sym_term (CI.ITP_sym nm), index))
-    in
-    (* resource.ml:derived_lc1 also requires the base to have an allocation
-       ID, even for an empty each. Shifted element footprints cannot imply it. *)
-    let resource =
+  let output = CI.ITP_mapget (CI.ITP_sym_term (CI.ITP_sym nm), index) in
+  let body, bind_output, type_constraint =
+    match q.name with
+    | Request.PName pname ->
+      ( CI.ITP_named_value
+          ( CI.ITP_sym pname,
+            pointer,
+            List.map (fun arg -> it_to_itp_ir gl arg (Some (arg, "predicate argument"))) q.iargs,
+            output ),
+        true,
+        None )
+    | Request.Owned (ct, Request.Init) ->
+      (CI.ITP_owned_value (owned_name ct, pointer, output), true, None)
+    | Request.Owned (ct, Request.Uninit) ->
+      ( CI.ITP_block_sized (Memory.size_of_ctype ct, pointer),
+        used,
+        if used then ghost_type_constraint gl bt (CI.ITP_sym_term (CI.ITP_sym nm)) else None )
+  in
+  let resource = CI.ITP_each_resource (CI.ITP_sym index_sym, permission, body) in
+  (* Only iterated Owned has the unconditional base allocation-ID fact.
+     A named predicate may legitimately own nothing, even at NULL. *)
+  let resource =
+    match q.name with
+    | Request.PName _ -> resource
+    | Request.Owned _ ->
       CI.ITP_Star
-        ( CI.ITP_Pure
-            (CI.ITP_memory_bool (true, "has_alloc_id", [it_to_itp_ir gl q.pointer None])),
-          CI.ITP_each_resource (CI.ITP_sym index_sym, permission, body) )
-    in
-    let result =
-      if requires then CI.ITP_Wand (resource, continuation)
-      else CI.ITP_Star (resource, continuation)
-    in
-    match init with
-    | Request.Uninit when not used -> result
-    | Request.Uninit | Request.Init ->
-      if requires then CI.ITP_Forall (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
-      else CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
+        (CI.ITP_Pure (CI.ITP_memory_bool (true, "has_alloc_id", [it_to_itp_ir gl q.pointer None])),
+         resource)
+  in
+  let resource =
+    match type_constraint with
+    | None -> resource
+    | Some constraint_ -> CI.ITP_Star (CI.ITP_Pure constraint_, resource)
+  in
+  let result =
+    if requires then CI.ITP_Wand (resource, continuation)
+    else CI.ITP_Star (resource, continuation)
+  in
+  if not bind_output then result
+  else if requires then CI.ITP_Forall (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
+  else CI.ITP_Exists (CI.ITP_sym nm, bt_to_itp_ir gl bt, result)
 
 
 (* Unpacking LogicalReturnTypes *)

@@ -1,5 +1,6 @@
   From iris.proofmode Require Import proofmode.
   From iris.bi.lib Require Import fixpoint_mono.
+  From iris.bi Require Import big_op.
 
   (** [solve_mono_go] proves goals of the form [body[Φ] -∗ body[Ψ]] (after
     [iIntros "HF"], so: goal [body[Ψ]] with "HF" : [body[Φ]]) for bodies
@@ -7,7 +8,7 @@
 
       P ::= ∃ x:A. P | l ↦ v | ⊤ | ⊥ | P ∗ Q | ⌜ϕ⌝ ∧ P | ⌜ϕ⌝
           | if b then P else Q | match e with C₁ xs₁ => P₁ | … | Cₙ xsₙ => Pₙ end
-          | f(e)
+          | [∗ set] x ∈ X, P | f(e)
 
     where [match] is over any NON-INDEXED inductive (plain parameters are
     fine; indexed families would need inversion rather than [destruct]) with
@@ -23,6 +24,7 @@
     - Φ-free subterm (↦, ⊤, ⊥, ⌜ϕ⌝, or any subtree without f): [iExact]
     - recursive call f(e): apply "Hmon"
     - ∃ / ∗ / ∧: mirror the structure and recurse
+    - finite separating conjunction: preserve the index set and recurse
     - match/if (incl. pattern-matching lambdas, which elaborate to matches):
       destruct the shared scrutinee; both sides reduce in lockstep. *)
 Ltac solve_mono_go :=
@@ -31,6 +33,10 @@ Ltac solve_mono_go :=
     [ iExact "HF"
     | iApply "Hmon"; iExact "HF"
     | lazymatch goal with
+      | |- environments.envs_entails _ (big_opS bi_sep _ _) =>
+          iApply (big_sepS_impl with "HF []");
+          let i := fresh "i" in let Hi := fresh "Hi" in
+          iIntros "!>" (i Hi) "HF"; solve_mono_go
       | |- environments.envs_entails _ (bi_exist _) =>
           let x := fresh "x" in
           iDestruct "HF" as (x) "HF"; iExists x; solve_mono_go
